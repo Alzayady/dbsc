@@ -11,8 +11,9 @@
 //!   POST /dbsc/refresh   – Chrome re-proves possession here (challenge → signed retry → re-mint)
 //!   GET  /api/protected  – reports whether the device-bound cookie rode along
 //!
-//! DBSC headers use the `Secure-Session-*` names (renamed from the old `Sec-Session-*`;
-//! Chrome's public docs are stale). DBSC only runs over TLS, hence the mkcert cert.
+//! DBSC headers use the `Secure-Session-*` names (plus `Sec-Secure-Session-Id`). Chrome's
+//! docs get these right; it's older blog posts / search results that still show the
+//! obsolete `Sec-Session-*` — don't copy those. DBSC only runs over TLS, hence mkcert.
 
 use axum::{
     extract::State,

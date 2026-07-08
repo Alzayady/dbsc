@@ -37,8 +37,9 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 | `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
 | `GET  /api/protected` | Web client (Call protected button) | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
 
-Header names are `Secure-Session-*` (the spec renamed them from the old `Sec-Session-*`;
-Chrome's public docs are stale). Session id on refresh is `Sec-Secure-Session-Id`.
+Header names are `Secure-Session-*`; Chrome's docs get these right — it's older blog posts
+/ search results that still show the obsolete `Sec-Session-*` (don't copy those). Session
+id on refresh is `Sec-Secure-Session-Id`.
 
 ---
 
@@ -236,6 +237,43 @@ way." Where we differ, it's because **we simplified** or because we run on **loc
 **Bottom line:** the reference is the more complete, production-shaped implementation; ours
 is a trimmed-down, heavily-commented Rust port of the same protocol, plus a protected
 endpoint to probe cookie delivery.
+
+### vs. the production PHP library ([report-uri/dbsc-php](https://github.com/report-uri/dbsc-php))
+
+Where `drubery` is Chrome's reference *test server*, `dbsc-php` is a **production** library —
+Report URI's real DBSC integration, extracted as a framework-agnostic package (PHP 8.1+,
+~700 lines, zero deps beyond `ext-openssl`). It's the source of this project's **security
+hardening**, so comparing against it shows exactly how much a *demo* omits versus a real
+server.
+
+**What we deliberately share with it** (our hardening follows it): single-phase register /
+two-phase (`403`→`200`) refresh · `Secure-Session-*` headers with the `id` sf-parameter on
+the challenge · offering only `(ES256)` in the registration header (not the Chrome docs'
+`(ES256 RS256)`) · a host-only `Secure`+`HttpOnly` bound cookie · **ES256 pinned** to block
+`alg` confusion (`none` / RS-with-EC-key) · a **fresh cookie value minted on every refresh**
+(re-emitting the old value makes Chrome think no refresh happened and drop the session).
+
+| Aspect | `dbsc-php` (production) | This project (demo) | Why we differ |
+|--------|------------------------|---------------------|---------------|
+| Shape | Framework-agnostic **library**: `DbscServer` takes a `RequestContext`, returns a `DbscResponse`; never touches globals / headers / cookies itself. | A **runnable HTTPS server** you `cargo run`. | We want something you can launch and watch, not embed. |
+| Stack | PHP 8.1+, `ext-openssl`. | Rust + axum, `p256`. | Learning in Rust. |
+| Storage | Your `StoreInterface` (Redis / table), keyed by the **stable app session id** in a **dedicated key space** — never a shared session blob (a race there clobbers the binding and silently disables enforcement). | In-memory `HashMap` keyed by the **DBSC `session_identifier`**, cleared on restart. | A hello-world has no login / app-session; the map is enough to demo register→refresh. |
+| JWT checks | **Rejects** (throws) on bad signature, wrong / expired challenge (`jti` vs stored, constant-time), or `alg≠ES256`. | Pins `alg=ES256` and *computes* signature validity, but **logs & continues** — never rejects; `jti` not checked. | Deliberate demo shortcut so even a failed check still shows the flow. A real server must reject — the code comment says exactly this. |
+| Challenge | 32 crypto-random bytes, single-use; `challengeTtl` **must exceed `cookieMaxAge`** (enforced in `Config`) so a challenge cached just before expiry still validates. | Monotonic counter (`chal1`, `chal2`, …), not verified. | Not security-relevant in a demo; short & alphanumeric keeps Chrome happy. |
+| Registration header | `(ES256); path="/dbsc/register"; challenge="…"` — **no** `authorization`. | Same, but we add `authorization="auth-code-123"`. | Both are spec-legal; we include it to show where an auth code would ride. |
+| Bound cookie | `__Host-dbsc` (default), `Max-Age=300`, `SameSite=Lax`. | `auth_cookie`, `Max-Age=20`, `SameSite=Strict`. | 20s makes the auto-refresh observable in seconds. We tried the `__Host-` prefix (see §5) — it made no difference to delivery here, so we kept a plain host-only name. |
+| `scope` JSON | `origin` + `include_site:false`, **no `scope_specification`** (a `__Host-` cookie can't span subdomains anyway). | `origin` + `include_site:false` + an explicit `scope_specification` **include** rule. | Both work; we keep the explicit rule to make the scope visible. |
+| Enforcement | Full gate **primitives**: `getBinding`, constant-time `boundCookieMatches` (with a single-depth previous-value overlap for refresh races), document-vs-subresource, a registration grace window. The caller wires the policy. | None — just `/api/protected` reporting whether the cookie rode along. | We only *probe* delivery (which surfaced the §5 limitation); we don't gate. |
+| Refresh robustness | Single-depth **challenge + cookie overlap** windows for latency races; an optional single-phase **first** refresh via `advertiseRefreshChallenge`. | Straight `403`→proof→`200`, fresh cookie each time, no overlap. | Those windows matter under real network latency, not on loopback. |
+| Revoke / logout | `revoke()` deletes state + emits a cookie deletion (distinct enforcement-terminated vs logout audit events). | Not implemented. | Out of scope for the demo. |
+| Audit + tests | `AuditLoggerInterface` events; a self-contained attack-case harness (wrong device key, wrong / expired challenge, stale cookie, `alg=none`). | `println!` to stdout; no tests. | The whole point here is *visibility in the terminal*, not coverage. |
+
+**Bottom line:** `dbsc-php` is what a **correct, production** DBSC server looks like —
+rejection on every failed check, real storage discipline, an enforcement gate, revocation,
+latency-race overlap windows, and attack tests. This project is a **single-file demo** that
+speaks the same wire protocol and borrows `dbsc-php`'s crypto / cookie hardening, but
+deliberately *logs-and-continues* instead of enforcing, so you can watch every step. Building
+the real thing → read `dbsc-php`; learning the handshake → read this.
 
 ---
 
