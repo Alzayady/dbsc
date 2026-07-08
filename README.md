@@ -205,6 +205,28 @@ which Chrome silently ignores. The docs never said that.)
 | 7 | Doesn't discuss server session lifecycle. | We **reject unknown sessions with `404`**. | Our session store is in-memory and resets on restart, but the browser persists sessions — without the `404` those stale sessions refresh forever (a storm). |
 | 8 | Implies the bound cookie is delivered to your app's requests. | On this setup it is **not** (see §5). | The macOS software-keys/localhost testing path exercises the handshake but doesn't complete production cookie-binding to app requests. |
 
+### vs. the official reference server ([drubery/dbsc-test-server](https://github.com/drubery/dbsc-test-server))
+
+This is the Chrome team's reference DBSC test server (TypeScript/Deno, live at
+`https://drubery-dbsc-test-server.deno.dev/`). **Our implementation is modeled on it** —
+the two things that differ from the Chrome-doc example (the **form-POST→`303` trigger** and
+the **`challenge` parameter**) come straight from this server, and it uses the same
+`Secure-Session-*` headers and `403` refresh. So "our way" *is* essentially "the reference
+way." Where we differ, it's because **we simplified** or because we run on **localhost**:
+
+| Aspect | Reference server | This project | Why we differ |
+|--------|------------------|--------------|---------------|
+| Correlation cookie `dbsc-registration-sessions-id` | Sets it in the form handler **and reads it** in `/register` to look up the pending session. | We **set it but don't read it** — `/register` just mints a fresh `session_identifier`. | Kept the demo minimal; correlation isn't needed when we create the session on the fly. |
+| JWT claim checks | Verifies signature **and** that `jti` == the issued challenge and `authorization` == the auth code. | We verify the **signature only** (log the claims). | Simpler to read; the signature is the core proof-of-possession. |
+| Enablement | Ships an **Origin-Trial token** (`origin-trial` header) valid for its real `deno.dev` domain. | Uses **Chrome testing flags** on `localhost`. | `localhost` can't carry a domain-bound OT token, so we take the flags door instead. |
+| Scope / cookie config | A form lets you set scope include/exclude paths, cookie name/value/lifetime at runtime. | **Hardcoded** (whole-origin scope, `auth_cookie`, 20s). | A hello-world doesn't need the knobs. |
+| Protected endpoint | **None** — it only shows a session table. | We added **`/api/protected`** to test cookie delivery. | To make "is the bound cookie delivered?" observable (which surfaced the §5 limitation). |
+| Language / stack | TypeScript on Deno; `fast-jwt` + `jwkToPem`. | Rust on axum; `p256` for ES256. | Personal preference / learning in Rust. |
+
+**Bottom line:** the reference is the more complete, production-shaped implementation; ours
+is a trimmed-down, heavily-commented Rust port of the same protocol, plus a protected
+endpoint to probe cookie delivery.
+
 ---
 
 ## 8. Files & references
