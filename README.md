@@ -161,7 +161,9 @@ production/CT cert** and hardware keys, or on **Windows** where DBSC is generall
 3. **`Enabled – For developers`**, not plain "Enabled" (skips the Origin-Trial-token gate
    that blocks localhost).
 4. **UnexportableKeyService flag** is required on macOS to generate the device key.
-5. **Header names are `Secure-Session-*`** (not `Sec-Session-*`; docs are stale).
+5. **Header names are `Secure-Session-*`** (registration/response/challenge) and
+   `Sec-Secure-Session-Id`. The Chrome docs get this right; lots of *older blog posts /
+   search results* still show the obsolete `Sec-Session-*` — don't copy those.
 6. **Registration must ride a form-POST → 303**; Chrome ignores the header on a plain GET
    navigation or a `fetch()` response.
 7. **Refresh challenge must return `403`** (not 401) — Chrome only re-signs on 403.
@@ -172,7 +174,40 @@ production/CT cert** and hardware keys, or on **Windows** where DBSC is generall
 
 ---
 
-## 7. Files & references
+## 7. How this differs from the Chrome docs
+
+Compared against
+[Chrome's DBSC guide](https://developer.chrome.com/docs/web-platform/device-bound-session-credentials).
+First, the important correction: **the Chrome docs are actually correct on the header
+names** — `Secure-Session-Registration`, `Secure-Session-Response`,
+`Secure-Session-Challenge`, and `Sec-Secure-Session-Id`. (An early failure here was
+self-inflicted: the first version used the obsolete `Sec-Session-*` names from memory,
+which Chrome silently ignores. The docs never said that.)
+
+### Where we follow the docs exactly
+- **Header names** (all `Secure-Session-*` / `Sec-Secure-Session-Id`).
+- **Refresh flow**: server challenges with **`403` + `Secure-Session-Challenge`**, the
+  browser retries with `Secure-Session-Response`, server returns `200` + fresh cookie.
+- **Session-config JSON** shape: `session_identifier`, `refresh_url`, `scope`
+  (`origin` / `include_site` / `scope_specification`), `credentials`.
+- **HTTPS required.**
+
+### Where we differ, and why
+
+| # | Chrome docs | This project | Why |
+|---|-------------|--------------|-----|
+| 1 | Emits `Secure-Session-Registration` on the **login response** (`200` + a long-lived cookie). | Emits it on a **form-POST → `303` redirect** (the *Start session* button). | A hello-world has no real login. A button submitting a form is the simplest trigger, and the `303`-redirect shape (matching the reference test server) is what reliably makes Chrome start registration. Functionally it's still "a POST whose response carries the header." |
+| 2 | Registration header example: `(ES256 RS256); path="/StartSession"` — **no `challenge`**. | We add `challenge="…"` and `authorization="…"`. | The `challenge` is echoed back in the JWT's `jti`, which is how a real server does anti-replay; both are permitted by the [spec](https://w3c.github.io/webappsec-dbsc/). Harmless to include. |
+| 3 | Bound cookie: `Max-Age=600` (10 min), `SameSite=Lax`, `Secure`. | `Max-Age=20`, `SameSite=Strict`, no `Secure`. | 20s makes the auto-refresh observable within seconds. `Strict`/no-`Secure` matched the reference server; the docs note `Secure` isn't strictly required. |
+| 4 | **No enablement steps** (it documents shipped/production behavior). | Requires Chrome flags: **`Enabled – For developers`**, **UnexportableKeyService**, software-keys. | On macOS, DBSC is still "manual testing"; those flags (from the [testing wiki](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC)) skip the Origin-Trial-token check and let the OS generate the device key. Without them Chrome silently does nothing on `localhost`. |
+| 5 | Describes an optional **long-lived fallback cookie** for when refresh fails. | Not implemented. | Out of scope for a minimal demo. |
+| 6 | Barely specifies the **JWT** ("a public key in a JWT"). | We parse it fully: read the EC `jwk` from the JWT header at registration, verify ES256; on refresh verify against the **stored** key. | The docs punt JWT details to the spec; we implemented them so the proof is actually checked. |
+| 7 | Doesn't discuss server session lifecycle. | We **reject unknown sessions with `404`**. | Our session store is in-memory and resets on restart, but the browser persists sessions — without the `404` those stale sessions refresh forever (a storm). |
+| 8 | Implies the bound cookie is delivered to your app's requests. | On this setup it is **not** (see §5). | The macOS software-keys/localhost testing path exercises the handshake but doesn't complete production cookie-binding to app requests. |
+
+---
+
+## 8. Files & references
 
 - `src/main.rs` — the whole server (~5 handlers + JWT/ES256 verification), heavily commented.
 - `localhost+2*.pem` — mkcert TLS cert/key (git-ignored via the parent repo).
