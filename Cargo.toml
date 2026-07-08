@@ -1,0 +1,20 @@
+# Standalone workspace root so this nested crate doesn't get pulled into
+# the parent rust_secure_chat package.
+[workspace]
+
+[package]
+name = "dbsc_hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# ES256 (P-256) signature verification for the device-bound proof-of-possession JWT.
+p256 = { version = "0.13", features = ["ecdsa"] }
+# HTTPS: DBSC requires a real TLS transport (plain http://localhost won't trigger it).
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
