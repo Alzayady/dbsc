@@ -46,24 +46,22 @@ Chrome's public docs are stale). Session id on refresh is `Sec-Secure-Session-Id
 
 ```mermaid
 sequenceDiagram
-    participant U as You (page JS)
-    participant B as Chrome (browser engine)
-    participant S as Server (this app)
+    participant U as You
+    participant B as Chrome
+    participant S as Server
 
-    U->>S: POST /start-form (HTML form submit)
-    S-->>B: 303 → /  + Secure-Session-Registration: (ES256 RS256); path="/dbsc/register"; challenge=...
-    Note over B: Generates a device key pair<br/>(private key stays in Secure Enclave)
-
-    B->>S: POST /dbsc/register<br/>Secure-Session-Response: JWT{ header.jwk = public key, claims.jti = challenge }
-    Note over S: Verify ES256 signature with the embedded public key<br/>Store pubkey under a new session_identifier
-    S-->>B: 200 { session_identifier, refresh_url, scope, credentials }<br/>Set-Cookie: auth_cookie=… (Max-Age=20s)
-
-    Note over B: ~cookie nears expiry, on an in-scope request
-    B->>S: POST /dbsc/refresh (Sec-Secure-Session-Id, no proof yet)
-    S-->>B: 403  Secure-Session-Challenge: "<new challenge>"; id="<session>"
-    B->>S: POST /dbsc/refresh<br/>Secure-Session-Response: JWT{ claims.jti = new challenge } (signed by same device key)
-    Note over S: Verify signature against the STORED public key
-    S-->>B: 200 { session config }  Set-Cookie: auth_cookie=… (fresh)
+    U->>S: POST /start-form
+    S-->>B: 303 redirect with Secure-Session-Registration header
+    Note over B: Generate device key pair<br/>private key stays in hardware
+    B->>S: POST /dbsc/register with signed JWT, public key in jwk
+    Note over S: Verify ES256 signature<br/>store public key under a session id
+    S-->>B: 200 session config and Set-Cookie auth_cookie 20s
+    Note over B: cookie nears expiry on an in-scope request
+    B->>S: POST /dbsc/refresh, Sec-Secure-Session-Id, no proof
+    S-->>B: 403 Secure-Session-Challenge
+    B->>S: POST /dbsc/refresh with re-signed JWT
+    Note over S: Verify against the STORED public key
+    S-->>B: 200 session config and fresh Set-Cookie
 ```
 
 Plain-text version:
