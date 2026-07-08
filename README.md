@@ -31,11 +31,11 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 
 | Method & path         | Who calls it            | What it does |
 |-----------------------|-------------------------|--------------|
-| `GET  /`              | you (navigation)        | Serves the demo page. |
-| `POST /start-form`    | the page's HTML `<form>`| Replies **303 → `/`** with a `Secure-Session-Registration` header + a `dbsc-registration-sessions-id` correlation cookie. This response is what makes Chrome start DBSC. |
-| `POST /dbsc/register` | **Chrome, automatically** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT header embeds the device **public key** (`jwk`). We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
-| `POST /dbsc/refresh`  | **Chrome, automatically** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. Chrome re-signs (same device key) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
-| `GET  /api/protected` | you (button)            | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
+| `GET  /`              | Web client (you)        | Serves the demo page. |
+| `POST /start-form`    | Web client (Start session button) | Replies **303 → `/`** with a `Secure-Session-Registration` header + a `dbsc-registration-sessions-id` correlation cookie. This response is what makes the browser start DBSC. |
+| `POST /dbsc/register` | **Browser (automatic)** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT header embeds the device **public key** (`jwk`). We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
+| `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
+| `GET  /api/protected` | Web client (Call protected button) | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
 
 Header names are `Secure-Session-*` (the spec renamed them from the old `Sec-Session-*`;
 Chrome's public docs are stale). Session id on refresh is `Sec-Secure-Session-Id`.
@@ -44,24 +44,29 @@ Chrome's public docs are stale). Session id on refresh is `Sec-Secure-Session-Id
 
 ## 3. The flow (sequence diagram)
 
+Three participants: **Web client** = the page / user-initiated requests · **Browser** =
+Chrome's DBSC engine making calls automatically, no user action · **Server** = this app.
+
 ```mermaid
 sequenceDiagram
-    participant U as You
-    participant B as Chrome
+    participant W as Web client
+    participant B as Browser
     participant S as Server
 
-    U->>S: POST /start-form
-    S-->>B: 303 redirect with Secure-Session-Registration header
-    Note over B: Generate device key pair<br/>private key stays in hardware
-    B->>S: POST /dbsc/register with signed JWT, public key in jwk
-    Note over S: Verify ES256 signature<br/>store public key under a session id
+    W->>S: POST /start-form - user clicks Start session
+    S-->>W: 303 redirect with Secure-Session-Registration header
+    Note over B: Browser reads the header and generates a device key pair<br/>private key stays in hardware
+    B->>S: POST /dbsc/register - automatic - signed JWT with public key
+    Note over S: Verify ES256 signature and store the public key
     S-->>B: 200 session config and Set-Cookie auth_cookie 20s
-    Note over B: cookie nears expiry on an in-scope request
-    B->>S: POST /dbsc/refresh, Sec-Secure-Session-Id, no proof
+    Note over B: later, cookie near expiry
+    B->>S: POST /dbsc/refresh - automatic - no proof yet
     S-->>B: 403 Secure-Session-Challenge
-    B->>S: POST /dbsc/refresh with re-signed JWT
-    Note over S: Verify against the STORED public key
+    B->>S: POST /dbsc/refresh - automatic - re-signed JWT
+    Note over S: Verify against the stored public key
     S-->>B: 200 session config and fresh Set-Cookie
+    W->>S: GET /api/protected - user clicks Call protected
+    S-->>W: authenticated true or false
 ```
 
 Plain-text version:

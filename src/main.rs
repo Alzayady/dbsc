@@ -151,7 +151,7 @@ async fn start_form() -> Response {
 /// its `jwk` header; we verify the signature (proof-of-possession), store the key against
 /// a new session, and return the session config + a short-lived bound cookie.
 async fn register(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
-    println!("\n[register] request headers: {headers:#?}");
+    println!("\n[register] POST /dbsc/register (browser sent its signed proof)");
 
     let Some(jwt) = jwt_from(&headers, &body) else {
         println!("[register] MISSING proof JWT (Secure-Session-Response header/body)");
@@ -183,7 +183,7 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
 /// First call has no proof -> we reply 403 + a challenge; Chrome re-signs (with the SAME
 /// device key) and retries -> we verify against the STORED key and re-mint the cookie.
 async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
-    println!("\n[refresh] request headers: {headers:#?}");
+    println!("\n[refresh] POST /dbsc/refresh");
 
     // Session id arrives in `Sec-Secure-Session-Id` on refresh.
     let session_id = headers
@@ -360,22 +360,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <h1>DBSC hello-world</h1>
   <p>Open <b>DevTools &rarr; Network</b>, then:</p>
   <ol>
-    <li>Click <b>Start session</b>. This submits an HTML form (POST <code>/start-form</code>),
-        which 303-redirects to <code>/</code> carrying <code>Secure-Session-Registration</code>.
-        Chrome then auto-POSTs <code>/dbsc/register</code> with a signed
-        <code>Secure-Session-Response</code> JWT, and later auto-calls
-        <code>/dbsc/refresh</code> (403 challenge &rarr; signed retry). Watch the terminal.</li>
-    <li><b>Call protected</b> reports whether the device-bound cookie was delivered.
-        NOTE: on the macOS software-keys testing setup this stays <code>false</code> —
-        see README ("what works vs. not"). The registration + refresh handshake above
-        is the part that genuinely works.</li>
+    <li><b>Start session</b> submits a form to <code>/start-form</code>; the browser then
+        automatically POSTs <code>/dbsc/register</code> and later <code>/dbsc/refresh</code>.
+        Watch the terminal.</li>
+    <li><b>Call protected</b> checks whether the device-bound cookie was delivered.
+        (On the macOS software-keys test setup this stays <code>false</code> — see README.)</li>
   </ol>
   <p>
     <form method="POST" action="/start-form" style="display:inline">
       <button type="submit">Start session</button>
     </form>
-    <button onclick="callProtected()">Call protected (fetch)</button>
-    <button onclick="location.href='/api/protected'">Open protected (navigation)</button>
+    <button onclick="callProtected()">Call protected</button>
   </p>
   <pre id="log">(server log is in your terminal; browser log here)</pre>
 <script>
