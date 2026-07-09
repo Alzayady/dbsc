@@ -1,7 +1,7 @@
 //! DBSC (Device Bound Session Credentials) hello-world.
 //!
 //! A small HTTPS server that makes the DBSC handshake *visible* so you can learn it.
-//! Every DBSC header is logged to stdout. See README.md for the full write-up: what
+//! Each request/response pair is logged to stdout as a numbered FLOW (1-5). See README.md: what
 //! DBSC is, the required Chrome flags, the sequence diagram, and what works vs. not.
 //!
 //! Endpoints (see README for the flow):
@@ -59,6 +59,12 @@ static COUNTER: AtomicU64 = AtomicU64::new(1);
 fn nonce(prefix: &str) -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}{n}")
+}
+
+/// Print a consistent "FLOW N" banner so each request/response pair is easy to spot in the
+/// terminal. Every handler logs exactly one `REQUEST` line and one `RESPONSE` line under it.
+fn flow_header(n: u8, title: &str) {
+    println!("\n════════ FLOW {n}: {title} ════════");
 }
 
 #[tokio::main]
@@ -122,7 +128,6 @@ fn registration_header() -> (HeaderName, HeaderValue) {
     let value = format!(
         "(ES256); path=\"/dbsc/register\"; challenge=\"{challenge}\"; authorization=\"auth-code-123\""
     );
-    println!("\n[trigger] Secure-Session-Registration: {value}");
     (
         HeaderName::from_static("secure-session-registration"),
         HeaderValue::from_str(&value).unwrap(),
@@ -136,6 +141,13 @@ async fn start_form() -> Response {
     let (reg_name, reg_value) = registration_header();
     let reg_id = nonce("regid");
 
+    flow_header(1, "TRIGGER  (POST /start-form)");
+    println!("  REQUEST : user clicked \"Start session\"");
+    println!(
+        "  RESPONSE: 303 -> /  |  Secure-Session-Registration: {}",
+        reg_value.to_str().unwrap_or("?")
+    );
+
     let mut headers = HeaderMap::new();
     headers.insert(reg_name, reg_value);
     headers.insert(header::LOCATION, HeaderValue::from_static("/"));
@@ -146,7 +158,6 @@ async fn start_form() -> Response {
         ))
         .unwrap(),
     );
-    println!("[start-form] -> 303 redirect to / with Secure-Session-Registration");
     (StatusCode::SEE_OTHER, headers, "").into_response()
 }
 
@@ -154,34 +165,38 @@ async fn start_form() -> Response {
 /// its `jwk` header; we verify the signature (proof-of-possession), store the key against
 /// a new session, and return the session config + a short-lived bound cookie.
 async fn register(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
-    println!("\n[register] POST /dbsc/register (browser sent its signed proof)");
+    flow_header(2, "REGISTER  (POST /dbsc/register)");
 
     let Some(jwt) = jwt_from(&headers, &body) else {
-        println!("[register] MISSING proof JWT (Secure-Session-Response header/body)");
+        println!("  REQUEST : (missing proof JWT)");
+        println!("  RESPONSE: 400 missing Secure-Session-Response");
         return (StatusCode::BAD_REQUEST, "missing Secure-Session-Response").into_response();
     };
     let Some((jwt_header, claims, signing_input, sig_b64)) = decode_jwt(&jwt) else {
+        println!("  RESPONSE: 400 could not parse DBSC JWT");
         return (StatusCode::BAD_REQUEST, "could not parse DBSC JWT").into_response();
     };
-    println!("[register] jwt header: {jwt_header}");
-    println!("[register] jwt claims: {claims}");
 
     // Pin ES256 — reject alg=none / RS-with-EC-key confusion before touching the signature.
     if jwt_header.get("alg").and_then(|a| a.as_str()) != Some("ES256") {
+        println!("  RESPONSE: 400 unsupported JWT alg (need ES256)");
         return (StatusCode::BAD_REQUEST, "unsupported JWT alg (need ES256)").into_response();
     }
-    // The device public key is embedded in the JWT header for registration.
+    // The device public key is embedded in the JWT header (jwk) for registration.
     let Some(pubkey) = pubkey_from_jwk(&jwt_header) else {
+        println!("  RESPONSE: 400 no jwk in JWT header");
         return (StatusCode::BAD_REQUEST, "no jwk in JWT header").into_response();
     };
     let verified = verify_sig(&signing_input, &sig_b64, &pubkey);
-    println!("[register] ES256 signature verified: {verified}");
-    // A production server would also check claims.jti == the challenge it issued and
-    // claims.authorization == its auth code, and REJECT if !verified. We log & continue.
+    let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?");
+    println!(
+        "  REQUEST : signed JWT  |  jwk=<device public key>  |  jti={jti}  |  ES256 verified={verified}"
+    );
+    // A production server would also check jti == the challenge it issued and
+    // authorization == its auth code, and REJECT if !verified. We log & continue.
 
     let session_id = nonce("sess");
     state.sessions.lock().unwrap().insert(session_id.clone(), pubkey);
-    println!("[register] opened session_identifier = {session_id}");
 
     session_response(&session_id)
 }
@@ -190,8 +205,6 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
 /// First call has no proof -> we reply 403 + a challenge; Chrome re-signs (with the SAME
 /// device key) and retries -> we verify against the STORED key and re-mint the cookie.
 async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
-    println!("\n[refresh] POST /dbsc/refresh");
-
     // Session id arrives in `Sec-Secure-Session-Id` on refresh.
     let session_id = headers
         .get("sec-secure-session-id")
@@ -204,7 +217,9 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
     // drop the stale session.
     let stored_key = state.sessions.lock().unwrap().get(&session_id).cloned();
     let Some(stored_key) = stored_key else {
-        println!("[refresh] unknown session {session_id} -> 404 (drop stale session)");
+        flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh)");
+        println!("  REQUEST : Sec-Secure-Session-Id={session_id}  (unknown to server)");
+        println!("  RESPONSE: 404 unknown session (tells Chrome to drop the stale session)");
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
 
@@ -213,7 +228,9 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
         // on 403, not 401). Format: "<challenge>";id="<session_id>".
         let challenge = nonce("refchal");
         let value = format!("\"{challenge}\";id=\"{session_id}\"");
-        println!("[refresh] -> 403 Secure-Session-Challenge: {value}");
+        flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh, no proof)");
+        println!("  REQUEST : Sec-Secure-Session-Id={session_id}  |  no proof yet");
+        println!("  RESPONSE: 403  |  Secure-Session-Challenge: {value}");
         let mut out = HeaderMap::new();
         out.insert(
             HeaderName::from_static("secure-session-challenge"),
@@ -224,12 +241,17 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
 
     // Proof provided: the refresh JWT has NO embedded key — verify it against the key we
     // stored at registration. That's the whole point: only this device can re-sign.
-    if let Some((jwt_header, claims, signing_input, sig_b64)) = decode_jwt(&jwt) {
-        let es256 = jwt_header.get("alg").and_then(|a| a.as_str()) == Some("ES256");
-        let verified = es256 && verify_sig(&signing_input, &sig_b64, &stored_key);
-        println!("[refresh] claims: {claims}  | verified against stored key: {verified}");
-    }
-    println!("[refresh] re-minting cookie for {session_id}");
+    flow_header(4, "REFRESH — PROOF  (POST /dbsc/refresh, signed JWT)");
+    let (jti, verified) = match decode_jwt(&jwt) {
+        Some((jwt_header, claims, signing_input, sig_b64)) => {
+            let es256 = jwt_header.get("alg").and_then(|a| a.as_str()) == Some("ES256");
+            let v = es256 && verify_sig(&signing_input, &sig_b64, &stored_key);
+            let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?").to_string();
+            (jti, v)
+        }
+        None => ("?".to_string(), false),
+    };
+    println!("  REQUEST : re-signed JWT  |  jti={jti}  |  no jwk  |  verified vs STORED key={verified}");
     session_response(&session_id)
 }
 
@@ -264,7 +286,9 @@ fn session_response(session_id: &str) -> Response {
     let set_cookie = format!(
         "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Strict"
     );
-    println!("[session] Set-Cookie: {set_cookie}");
+    println!(
+        "  RESPONSE: 200  |  session_identifier={session_id}  |  Set-Cookie {COOKIE_NAME}={cookie_value} (Max-Age={COOKIE_MAX_AGE_SECS}s)"
+    );
 
     let mut out = HeaderMap::new();
     out.insert(header::SET_COOKIE, HeaderValue::from_str(&set_cookie).unwrap());
@@ -280,7 +304,9 @@ async fn protected(headers: HeaderMap) -> Response {
     let authed = cookie
         .split(';')
         .any(|c| c.trim().starts_with(&format!("{COOKIE_NAME}=")));
-    println!("[protected] cookie header = {cookie:?} -> authenticated={authed}");
+    flow_header(5, "PROTECTED  (GET /api/protected)");
+    println!("  REQUEST : Cookie: {cookie:?}");
+    println!("  RESPONSE: authenticated={authed}");
     Json(json!({ "authenticated": authed, "cookie_header": cookie })).into_response()
 }
 
@@ -309,7 +335,6 @@ fn jwt_from(headers: &HeaderMap, body: &str) -> Option<String> {
 fn decode_jwt(jwt: &str) -> Option<(Value, Value, String, String)> {
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() != 3 {
-        println!("[jwt] expected 3 dot-separated parts, got {}", parts.len());
         return None;
     }
     let header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).ok()?).ok()?;
