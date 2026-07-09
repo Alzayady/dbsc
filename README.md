@@ -141,6 +141,30 @@ lives exactly as long as the server-side binding, which you tie to your login/se
 > server keys its binding by the **stable app session id** instead, and treats the
 > `session_identifier` as a separate nonce the browser echoes back (see §9.3).
 
+### The two "path"s in Flow 1 are unrelated
+
+Flow 1's response has two tokens that both say "path" — they live on **different headers** and
+mean **completely different things**. The name collision trips everyone up:
+
+```
+Secure-Session-Registration: (ES256); path="/dbsc/register"; challenge="…"   ← header #1
+Set-Cookie: dbsc-registration-sessions-id=regid11; Path=/; Max-Age=3600       ← header #2
+```
+
+| Token | On which header | Kind | What it means |
+|-------|-----------------|------|---------------|
+| `path="/dbsc/register"` | `Secure-Session-Registration` | a **DBSC parameter** | The **endpoint** Chrome should POST the signed proof JWT to. |
+| `Path=/` | `Set-Cookie` | a **standard cookie attribute** ([RFC 6265](https://datatracker.ietf.org/doc/html/rfc6265)) | The **URL scope** of the correlation cookie — which requests the browser attaches it to. |
+
+- `path="/dbsc/register"` is a DBSC *instruction* ("post your proof here"). Lowercase, and it's
+  a parameter of the registration structured field.
+- `Path=/` is ordinary cookie plumbing, nothing DBSC-specific ("send this cookie on any URL
+  under `/`"). It's `/` here so the correlation cookie is guaranteed to ride along on the very
+  next request — the `POST /dbsc/register` — which is how the reference server correlates that
+  call back to the login. (This demo sets the cookie but doesn't read it — see §7.)
+
+So one is "**where to send the proof**", the other is "**which URLs this cookie is sent for**".
+
 ---
 
 ## 4. Setup & run
