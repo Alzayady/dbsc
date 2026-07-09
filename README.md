@@ -33,8 +33,8 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 |-----------------------|-------------------------|--------------|
 | `GET  /`              | Web client (you)        | Serves the demo page. |
 | `POST /start-form`    | Web client (Start session button) | Replies **303 → `/`** with a `Secure-Session-Registration` header + a `dbsc-registration-sessions-id` correlation cookie. This response is what makes the browser start DBSC. |
-| `POST /dbsc/register` | **Browser (automatic)** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT header embeds the device **public key** (`jwk`). We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
-| `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
+| `POST /dbsc/register` | **Browser (automatic)** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT **header** embeds the device **public key** as a `jwk`; the **claims** echo our challenge back as the `jti`. We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
+| `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key; new challenge as `jti`, **no `jwk`**) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
 | `GET  /api/protected` | Web client (Call protected button) | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
 
 Header names are `Secure-Session-*`; Chrome's docs get these right — it's older blog posts
@@ -55,16 +55,16 @@ sequenceDiagram
     participant S as Server
 
     W->>S: POST /start-form - user clicks Start session
-    S-->>W: 303 redirect with Secure-Session-Registration header
-    Note over B: Browser reads the header and generates a device key pair<br/>private key stays in hardware
-    B->>S: POST /dbsc/register - automatic - signed JWT with public key
-    Note over S: Verify ES256 signature and store the public key
+    S-->>W: 303 + Secure-Session-Registration (algs, path, challenge)
+    Note over B: Browser generates a device key pair<br/>private key stays in hardware
+    B->>S: POST /dbsc/register - automatic - signed JWT<br/>(jwk = public key in header, jti = challenge in claims)
+    Note over S: Verify ES256 signature using the jwk<br/>(prod also checks jti == the challenge), store the key
     S-->>B: 200 session config and Set-Cookie auth_cookie 20s
     Note over B: later, cookie near expiry
     B->>S: POST /dbsc/refresh - automatic - no proof yet
-    S-->>B: 403 Secure-Session-Challenge
-    B->>S: POST /dbsc/refresh - automatic - re-signed JWT
-    Note over S: Verify against the stored public key
+    S-->>B: 403 Secure-Session-Challenge (new challenge)
+    B->>S: POST /dbsc/refresh - automatic - re-signed JWT<br/>(jti = new challenge, NO jwk)
+    Note over S: Verify against the STORED public key
     S-->>B: 200 session config and fresh Set-Cookie
     W->>S: GET /api/protected - user clicks Call protected
     S-->>W: authenticated true or false
@@ -74,16 +74,31 @@ Plain-text version:
 
 ```
 You → POST /start-form
-Server → 303 /  + Secure-Session-Registration            (invite)
+Server → 303 /  + Secure-Session-Registration            (invite: algs, path, challenge)
 Chrome makes a device key pair (private key in hardware)
-Chrome → POST /dbsc/register  (Secure-Session-Response = signed JWT + public key)
-Server verifies signature, stores public key, → 200 config + Set-Cookie auth_cookie (20s)
+Chrome → POST /dbsc/register  (Secure-Session-Response = signed JWT;
+                               jwk = public key in header, jti = challenge in claims)
+Server verifies signature via the jwk, stores the public key, → 200 config + Set-Cookie (20s)
 ... cookie about to expire ...
 Chrome → POST /dbsc/refresh   (Sec-Secure-Session-Id, no proof)
-Server → 403 + Secure-Session-Challenge
-Chrome → POST /dbsc/refresh   (Secure-Session-Response = re-signed JWT)
+Server → 403 + Secure-Session-Challenge   (a new challenge)
+Chrome → POST /dbsc/refresh  (Secure-Session-Response = re-signed JWT;
+                              jti = new challenge, NO jwk — key already stored)
 Server verifies vs stored key, → 200 config + fresh Set-Cookie
 ```
+
+**What's inside the proof JWT** (a compact JWS — `header.payload.signature`):
+
+- **`jwk`** (in the JWT *header*) — the device's **public** key (EC P-256 `x`/`y` coordinates).
+  Sent **only at registration**; the private half never leaves the hardware. The server stores
+  this jwk and verifies every future proof against it. On **refresh there is no `jwk`** — the
+  key is already known, so re-sending it would defeat the point.
+- **`jti`** (a JWT *claim*) — the **challenge** the server issued, echoed back. It proves the
+  signature is **fresh**, not a replay. Present on **both** the register and refresh JWTs (each
+  carries whatever challenge the server most recently issued). A production server checks
+  `jti == the challenge it sent`; this demo logs it (see §5). The signature covers
+  `header.payload`, so a valid signature proves possession of the private key *and* binds this
+  exact challenge.
 
 ---
 
