@@ -287,3 +287,67 @@ the real thing → read `dbsc-php`; learning the handshake → read this.
 - Spec: <https://w3c.github.io/webappsec-dbsc/> ·
   Testing guide: <https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC> ·
   Chrome docs: <https://developer.chrome.com/docs/web-platform/device-bound-session-credentials>
+
+---
+
+## 9. Next steps (turning this demo into a real integration)
+
+This is a hello-world: it demonstrates the *handshake* with a `Start session` button and
+*logs-and-continues* instead of enforcing. To make it real, in rough priority order:
+
+### 9.1 Fold registration into the real login — drop the button
+
+There is **no** browser "call `/start-form`" step, and no client feature-detection. DBSC
+registration is **server-triggered**: you attach the `Secure-Session-Registration` header to
+a response your app *already* sends. The natural home is the **login response**.
+
+- A real login is a **POST** of credentials, and usually already redirects on success
+  (Post/Redirect/Get). Just **add the header to that response**:
+
+  ```
+  POST /login   (credentials)
+  → 303 See Other
+    Location: /dashboard
+    Secure-Session-Registration: (ES256); path="/dbsc/register"; challenge="…"
+    Set-Cookie: session=…          (your normal app session cookie)
+  ```
+
+- Status is `303`/`302` **or** `200` — whatever your login already returns. It is **not**
+  `403`/`401` (those would make Chrome report a Challenge Error). `403` belongs only to the
+  `/dbsc/refresh` challenge. Registration is single-phase; refresh is two-phase.
+- The header **must ride the response to a POST navigation**, never a `fetch()`/XHR response
+  or a plain GET (Chrome silently drops it there — see §6, learning 6). So the button here is
+  a stand-in for the login POST; a real app deletes it and the `/start-form` handler and
+  merges that `303`-with-header logic into `POST /login`.
+- **No feature detection needed:** always send the header. DBSC-capable browsers register;
+  others ignore it and continue on normal cookies (additive, can't lock anyone out).
+
+### 9.2 Actually enforce (the security payoff — currently missing)
+
+Today `/dbsc/register` and `/dbsc/refresh` **log** verification and continue. A real server
+must:
+
+- **Reject** on any failed check: `alg≠ES256`, bad signature, and `jti` ≠ the challenge we
+  issued (and, at registration, the `authorization` code). Use constant-time comparison.
+- Add an **enforcement gate** on protected routes: if a session is bound (a binding exists)
+  but the request's bound cookie is missing/mismatched, **revoke + log the user out** — don't
+  just report `authenticated:false`. Enforce on document loads *and* subresources past a short
+  registration grace, and skip the gate on the `/dbsc/*` endpoints. (See `report-uri/dbsc-php`
+  §7 for the exact primitives.)
+
+### 9.3 Production-grade state & crypto
+
+- **Real storage** keyed by a **stable session id** in a **dedicated key space** (Redis/DB),
+  not an in-memory `HashMap` and not a shared session blob (the read-modify-write race
+  clobbers the binding and silently disables enforcement).
+- **Crypto-random, single-use challenges** (not the demo's monotonic counter), with
+  `challengeTtl > cookieMaxAge` so a challenge cached just before cookie expiry still validates.
+- **Revocation** on logout (delete state + emit a bound-cookie deletion).
+- **Latency-race overlap windows** (accept the single previous cookie value / challenge during
+  the refresh round-trip) so normal requests racing a refresh don't get spuriously logged out.
+
+### 9.4 Get real cookie delivery working
+
+The unresolved §5 limitation (bound cookie not delivered to app requests) is tied to the macOS
+software-keys/localhost testing path. Retest on a **real HTTPS domain with hardware keys**, or
+on **Windows** where DBSC is generally available, before trusting `/api/protected`.
