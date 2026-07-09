@@ -410,6 +410,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
         (On the macOS software-keys test setup this stays <code>false</code> — see README.)</li>
   </ol>
   <p>
+    <!-- This is a real form-POST navigation (so the page reloads) ON PURPOSE. The
+         Secure-Session-Registration header must ride the response to a POST navigation;
+         Chrome silently IGNORES it on a fetch()/XHR response, so don't "fix" the reload by
+         switching to fetch(). In a real app this is just your normal login POST → redirect. -->
     <form method="POST" action="/start-form" style="display:inline">
       <button type="submit">Start session</button>
     </form>
