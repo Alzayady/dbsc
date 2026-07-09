@@ -62,7 +62,8 @@ fn nonce(prefix: &str) -> String {
 }
 
 /// Print a consistent "FLOW N" banner so each request/response pair is easy to spot in the
-/// terminal. Every handler logs exactly one `REQUEST` line and one `RESPONSE` line under it.
+/// terminal. Each handler then logs its full REQUEST and RESPONSE — status, every header it
+/// sets (including cookies) and the body.
 fn flow_header(n: u8, title: &str) {
     println!("\n════════ FLOW {n}: {title} ════════");
 }
@@ -140,24 +141,19 @@ fn registration_header() -> (HeaderName, HeaderValue) {
 async fn start_form() -> Response {
     let (reg_name, reg_value) = registration_header();
     let reg_id = nonce("regid");
+    let set_cookie = format!("dbsc-registration-sessions-id={reg_id}; Path=/; Max-Age=3600");
 
     flow_header(1, "TRIGGER  (POST /start-form)");
-    println!("  REQUEST : user clicked \"Start session\"");
-    println!(
-        "  RESPONSE: 303 -> /  |  Secure-Session-Registration: {}",
-        reg_value.to_str().unwrap_or("?")
-    );
+    println!("  REQUEST : POST /start-form   (HTML form submit; no body)");
+    println!("  RESPONSE: 303 See Other");
+    println!("            Location: /");
+    println!("            Secure-Session-Registration: {}", reg_value.to_str().unwrap_or("?"));
+    println!("            Set-Cookie: {set_cookie}");
 
     let mut headers = HeaderMap::new();
     headers.insert(reg_name, reg_value);
     headers.insert(header::LOCATION, HeaderValue::from_static("/"));
-    headers.insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&format!(
-            "dbsc-registration-sessions-id={reg_id}; Path=/; Max-Age=3600"
-        ))
-        .unwrap(),
-    );
+    headers.insert(header::SET_COOKIE, HeaderValue::from_str(&set_cookie).unwrap());
     (StatusCode::SEE_OTHER, headers, "").into_response()
 }
 
@@ -189,9 +185,9 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
     };
     let verified = verify_sig(&signing_input, &sig_b64, &pubkey);
     let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?");
-    println!(
-        "  REQUEST : signed JWT  |  jwk=<device public key>  |  jti={jti}  |  ES256 verified={verified}"
-    );
+    println!("  REQUEST : POST /dbsc/register");
+    println!("            Secure-Session-Response (JWT): {jwt}");
+    println!("            decoded -> jwk=<device public key>, jti={jti}, ES256 verified={verified}");
     // A production server would also check jti == the challenge it issued and
     // authorization == its auth code, and REJECT if !verified. We log & continue.
 
@@ -218,8 +214,10 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
     let stored_key = state.sessions.lock().unwrap().get(&session_id).cloned();
     let Some(stored_key) = stored_key else {
         flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh)");
-        println!("  REQUEST : Sec-Secure-Session-Id={session_id}  (unknown to server)");
-        println!("  RESPONSE: 404 unknown session (tells Chrome to drop the stale session)");
+        println!("  REQUEST : POST /dbsc/refresh");
+        println!("            Sec-Secure-Session-Id: {session_id}  (unknown to server)");
+        println!("  RESPONSE: 404 Not Found   (tells Chrome to drop the stale session)");
+        println!("            body: unknown session");
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
 
@@ -229,8 +227,10 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
         let challenge = nonce("refchal");
         let value = format!("\"{challenge}\";id=\"{session_id}\"");
         flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh, no proof)");
-        println!("  REQUEST : Sec-Secure-Session-Id={session_id}  |  no proof yet");
-        println!("  RESPONSE: 403  |  Secure-Session-Challenge: {value}");
+        println!("  REQUEST : POST /dbsc/refresh");
+        println!("            Sec-Secure-Session-Id: {session_id}   (no proof yet)");
+        println!("  RESPONSE: 403 Forbidden");
+        println!("            Secure-Session-Challenge: {value}");
         let mut out = HeaderMap::new();
         out.insert(
             HeaderName::from_static("secure-session-challenge"),
@@ -251,7 +251,10 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
         }
         None => ("?".to_string(), false),
     };
-    println!("  REQUEST : re-signed JWT  |  jti={jti}  |  no jwk  |  verified vs STORED key={verified}");
+    println!("  REQUEST : POST /dbsc/refresh");
+    println!("            Sec-Secure-Session-Id: {session_id}");
+    println!("            Secure-Session-Response (JWT): {jwt}");
+    println!("            decoded -> jti={jti}, no jwk, verified vs STORED key={verified}");
     session_response(&session_id)
 }
 
@@ -286,8 +289,11 @@ fn session_response(session_id: &str) -> Response {
     let set_cookie = format!(
         "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Strict"
     );
+    println!("  RESPONSE: 200 OK");
+    println!("            Set-Cookie: {set_cookie}");
     println!(
-        "  RESPONSE: 200  |  session_identifier={session_id}  |  Set-Cookie {COOKIE_NAME}={cookie_value} (Max-Age={COOKIE_MAX_AGE_SECS}s)"
+        "            body (session config): {}",
+        serde_json::to_string(&config).unwrap_or_default()
     );
 
     let mut out = HeaderMap::new();
@@ -305,8 +311,10 @@ async fn protected(headers: HeaderMap) -> Response {
         .split(';')
         .any(|c| c.trim().starts_with(&format!("{COOKIE_NAME}=")));
     flow_header(5, "PROTECTED  (GET /api/protected)");
-    println!("  REQUEST : Cookie: {cookie:?}");
-    println!("  RESPONSE: authenticated={authed}");
+    println!("  REQUEST : GET /api/protected");
+    println!("            Cookie: {cookie:?}");
+    println!("  RESPONSE: 200 OK");
+    println!("            body: {{\"authenticated\":{authed},\"cookie_header\":{cookie:?}}}");
     Json(json!({ "authenticated": authed, "cookie_header": cookie })).into_response()
 }
 
