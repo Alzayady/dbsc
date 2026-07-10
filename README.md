@@ -142,6 +142,42 @@ these steps and **store** the resulting key. On **refresh there is no `jwk`**, s
 against the **stored** key. That's the anti-theft core: refresh proofs are always checked against
 the key captured once at registration, so only the original device can produce them.
 
+### The session config (the JSON body of Flows 2 & 4)
+
+The `200` response to register **and** refresh carries a JSON **session config** — the server's
+instruction sheet that lets Chrome run the whole session on its own (no page JavaScript). Example:
+
+```json
+{
+  "session_identifier": "sess3",
+  "refresh_url": "/dbsc/refresh",
+  "scope": {
+    "origin": "https://localhost:3000",
+    "include_site": false,
+    "scope_specification": [ { "type": "include", "domain": "localhost", "path": "/" } ]
+  },
+  "credentials": [ { "type": "cookie", "name": "auth_cookie",
+                     "attributes": "Path=/; Secure; HttpOnly; SameSite=Lax" } ]
+}
+```
+
+| Field | Meaning / what Chrome does with it |
+|-------|------------------------------------|
+| **`session_identifier`** | Handle for this session; Chrome echoes it back as `Sec-Secure-Session-Id` on every refresh so the server knows which stored key to verify against. |
+| **`refresh_url`** | **Where Chrome POSTs to renew the cookie** when it nears expiry. Chrome **auto-excludes** this URL from the scope so refresh requests aren't themselves deferred. |
+| **`scope`** | **Which requests this session governs** — which must carry a fresh bound cookie (and which Chrome defers + refreshes for). |
+| ↳ `origin` | The origin the session belongs to. |
+| ↳ `include_site` | `false` = **this origin only** (no subdomain span); `true` = the whole registrable site (`*.example.com`). |
+| ↳ `scope_specification` | `include`/`exclude` rules by domain+path. Here one `include` of `/` → manage the cookie for **all paths**. Add `exclude` rules (e.g. `/static`) to leave paths unmanaged. |
+| **`credentials`** | **Which cookie(s) Chrome treats as device-bound and keeps fresh.** |
+| ↳ `name` | Must **match the `Set-Cookie` name** (`auth_cookie`) or Chrome won't link them. |
+| ↳ `attributes` | The attribute template for the managed cookie (mirrors the `Set-Cookie`, minus `Max-Age`). |
+
+So after Flow 2 Chrome knows: *"for requests in **scope**, keep the cookie named `auth_cookie`
+fresh; when it's about to expire, POST to **`refresh_url`** with **`session_identifier`**, get a
+new cookie, carry on."* That's what makes the register/refresh loop self-sustaining — the config
+is returned on **both** register and refresh so Chrome always holds the current instructions.
+
 ### The three IDs (and how long each lives) — don't mix them up
 
 DBSC juggles three different identifiers. Confusing them is the #1 source of "wait, which id
