@@ -100,6 +100,48 @@ Server verifies vs stored key, → 200 config + fresh Set-Cookie
   `header.payload`, so a valid signature proves possession of the private key *and* binds this
   exact challenge.
 
+### From `jwk` to a verifiable key (how the server rebuilds the public key)
+
+An EC public key **is a point `(x, y)` on the P-256 curve** (the private key is a secret number
+`d`; the public key is the point `d·G`). The `jwk` just carries those two coordinates as
+**base64url-encoded, 32-byte big-endian integers**. "Getting the public key from the `jwk`" means
+converting those two strings into the byte format the crypto library expects. Worked example from
+a real registration JWT header:
+
+```json
+"jwk": { "kty":"EC", "crv":"P-256",
+         "x":"DA_3CaScQDr_kHODhKDgBxd8293dH3XRPmJcRNd-oNU",
+         "y":"V5XJ0ZRAZQA0t3SR5ZkA80nvjNUdt_90AvoekPXQtgc" }
+```
+
+1. **Pull `x` and `y`** out of the JWK JSON (`pubkey_from_jwk` in `main.rs`) — still just strings.
+2. **base64url-decode each → 32 raw bytes** (P-256 coordinates are 32 bytes; the code rejects
+   anything else):
+   ```
+   x = 0c0ff709 a49c403a ff907383 84a0e007 177cdbdd dd1f75d1 3e625c44 d77ea0d5
+   y = 5795c9d1 94406500 34b77491 e59900f3 49ef8cd5 1db7ff74 02fa1e90 f5d0b607
+   ```
+3. **Concatenate into the SEC1 *uncompressed point*** — `0x04 || X || Y` (1 + 32 + 32 = 65 bytes).
+   The leading `0x04` is the SEC1 tag meaning "uncompressed — both coordinates follow":
+   ```
+   04 0c0ff709…d77ea0d5 5795c9d1…f5d0b607
+   ```
+4. **Parse it:** `VerifyingKey::from_sec1_bytes(&sec1)` turns those 65 bytes into a usable key.
+
+Then verify: `vk.verify(signing_input, sig)` where `signing_input` = the literal `header.payload`
+bytes and `sig` = the JWT's raw 64-byte `r‖s` signature (not DER). Success ⇒ the device holds the
+private key matching that point.
+
+**Why the `04 || X || Y` dance?** JWK and the crypto library describe the *same* key in *different*
+formats — JWK as "two base64url numbers," SEC1 as "one byte string." Step 3 is purely a format
+conversion. (A production server does the identical thing via a helper, e.g. `dbsc-php` uses
+`jwkToPem` then verifies with OpenSSL.)
+
+**Registration vs refresh:** the `jwk` is present **only at registration** — that's when you run
+these steps and **store** the resulting key. On **refresh there is no `jwk`**, so you verify
+against the **stored** key. That's the anti-theft core: refresh proofs are always checked against
+the key captured once at registration, so only the original device can produce them.
+
 ### The three IDs (and how long each lives) — don't mix them up
 
 DBSC juggles three different identifiers. Confusing them is the #1 source of "wait, which id
