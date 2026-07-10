@@ -446,3 +446,70 @@ must:
 The unresolved §5 limitation (bound cookie not delivered to app requests) is tied to the macOS
 software-keys/localhost testing path. Retest on a **real HTTPS domain with hardware keys**, or
 on **Windows** where DBSC is generally available, before trusting `/api/protected`.
+
+### 9.5 What to store server-side (per user / per session)
+
+DBSC's whole security guarantee lives in **server-side state**: the public key you check every
+refresh against, and the current cookie/challenge values. This demo keeps a toy version (a
+`HashMap<session_identifier, PubKey>`); below is what a **real** server stores, modeled on the
+production `report-uri/dbsc-php` (`Binding` + `PendingRegistration`).
+
+**First, the golden rules:**
+
+- **A user has *many* DBSC sessions** — one per device/browser (laptop + phone + work machine =
+  three). So this is **per-session** state, indexed so you can also list/revoke **per user**.
+- **Key it by your stable app session id, in a dedicated key space** (Redis, a table) — **never**
+  inside a read-modify-written shared "session blob." The post-login navigation races the
+  `/dbsc/register` POST; both rewrite the blob last-writer-wins, the binding is clobbered, and
+  enforcement silently no-ops — the exact stolen-cookie hole DBSC exists to close.
+- **Never store the private key.** It never leaves the device's hardware; you only ever receive
+  and store the **public** key.
+
+**Two records per session:**
+
+**(A) Pending registration** — transient; written when you *offer* DBSC (emit the
+`Secure-Session-Registration` header at login), deleted the moment `/dbsc/register` succeeds, and
+expired on the challenge TTL if the device never answers.
+
+| Field | Example | Why |
+|-------|---------|-----|
+| `user_id` | `u_8213` | Which account this registration is for. |
+| `registration_challenge` | `f3a9…` (32 random bytes) | The nonce you put in the header; checked against the JWT's `jti` at register. |
+| `created_at` | `1720…` | Enforce the challenge TTL (reject a stale registration). |
+
+**(B) Binding** — the durable record; created on a *successful* `/dbsc/register` and its very
+existence is the authoritative "this session is device-bound" mark. Lives for the session
+lifetime.
+
+| Field | Example | Why it's stored |
+|-------|---------|-----------------|
+| `user_id` | `u_8213` | Owner — lets you list/revoke all of a user's device sessions. |
+| `session_identifier` | `sess_a1b2…` | The DBSC handle Chrome echoes in `Sec-Secure-Session-Id`; **your lookup key on every refresh**. Stable for the session's life (§3). |
+| **`device_public_key`** (JWK or PEM) | `-----BEGIN PUBLIC KEY-----…` | **The crux.** Every future refresh proof is verified against this. Captured once from the registration JWT's `jwk`. |
+| `algorithm` | `ES256` | Pin it; reject anything else (blocks alg-confusion). |
+| `current_cookie_value` | `c_9f2e…` | Compared (constant-time) against the presented bound cookie at the enforcement gate. Rotates every refresh. |
+| `current_challenge` + `challenge_issued_at` | `refchal_77…`, `1720…` | The nonce the **next** refresh JWT must carry as `jti`; time drives the TTL check. |
+| `created_at` | `1720…` | Registration-grace window + session age. |
+| `expires_at` | `1720…` | Tie to your session lifetime (a 30-day "remember me" keeps it for weeks; a short session sooner). |
+
+**Recommended extras** (production-hardening for real network latency — see the `dbsc-php`
+comparison in §7):
+
+| Field | Why |
+|-------|-----|
+| `previous_cookie_value` + `previous_cookie_expires_at` | Accept the single prior cookie value during the refresh round-trip, so a normal request racing a refresh isn't spuriously logged out. |
+| `previous_challenge` + `previous_challenge_at` | Same overlap idea for the challenge (a reactive `403` racing an advertised challenge). |
+| `last_refreshed_at` / `has_refreshed` | Diagnostics, and to gate the optional single-phase *first* refresh (`advertiseRefreshChallenge`). |
+
+**Invariant to enforce in config:** `challengeTtl` **must exceed** `cookieMaxAge`, so a challenge
+the browser cached just before the cookie expired is still valid when it's finally used.
+
+**Minimal viable set** (if you want the smallest correct binding): `user_id`,
+`session_identifier`, `device_public_key`, `algorithm`, `current_cookie_value`,
+`current_challenge` + `challenge_issued_at`, `created_at`, `expires_at`. Everything else is
+robustness/observability on top.
+
+> Mapping back to this demo: we store only `session_identifier → device_public_key`, mint a fresh
+> cookie value each refresh **without** persisting it, use a monotonic counter instead of random
+> challenges, and never check `jti` — which is why the code says "log & continue" instead of
+> enforcing. §9.2 + this table together are the gap between the demo and a real server.
