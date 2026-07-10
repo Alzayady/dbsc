@@ -213,9 +213,16 @@ old persisted DBSC sessions before a fresh run.
   are dropped instead of causing a refresh storm.
 
 ### ❌ Doesn't work on this setup
-- **`/api/protected` shows `authenticated=false`.** The device-bound cookie is delivered
-  to Chrome's own `/dbsc/refresh` requests, but **not** to our page's requests. Chrome keeps
-  re-refreshing without ever treating the bound cookie as "settled" for app requests.
+- **`/api/protected` shows `authenticated=false`.** The device-bound `auth_cookie` is **never
+  attached to any request** — not our page's `/api/protected`, and **not even** Chrome's own
+  `/dbsc/refresh` (which identifies the session via `Sec-Secure-Session-Id`, not the cookie).
+  Chrome keeps re-refreshing but never delivers the bound cookie to a request.
+  **What this rules in:** ordinary cookies work fine on this origin — the plain
+  `dbsc-registration-sessions-id` correlation cookie rides *every* request (register, refresh,
+  **and** `/api/protected`, visible in the logs). So the blocker is specific to the
+  **DBSC-managed** cookie, not cookies in general. *(An earlier version of this note claimed the
+  bound cookie was delivered to `/dbsc/refresh`; logging the incoming `Cookie:` header on every
+  flow showed it isn't — the correlation cookie is the only cookie on those requests.)*
 
   **Ruled out (things we tried that made no difference):** `fetch()` vs. top-level
   navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; and the strict
