@@ -54,37 +54,55 @@ sequenceDiagram
     participant B as Browser
     participant S as Server
 
-    W->>S: POST /start-form - user clicks Start session
-    S-->>W: 303 + Secure-Session-Registration (algs, path, challenge)
-    Note over B: Browser generates a device key pair<br/>private key stays in hardware
-    B->>S: POST /dbsc/register - automatic - signed JWT<br/>(jwk = public key in header, jti = challenge in claims)
-    Note over S: Verify ES256 signature using the jwk<br/>(prod also checks jti == the challenge), store the key
-    S-->>B: 200 session config and Set-Cookie auth_cookie 20s
-    Note over B: later, cookie near expiry
-    B->>S: POST /dbsc/refresh - automatic - no proof yet
-    S-->>B: 403 Secure-Session-Challenge (new challenge)
-    B->>S: POST /dbsc/refresh - automatic - re-signed JWT<br/>(jti = new challenge, NO jwk)
-    Note over S: Verify against the STORED public key
-    S-->>B: 200 session config and fresh Set-Cookie
-    W->>S: GET /api/protected - user clicks Call protected
-    S-->>W: authenticated true or false
+    rect rgb(240, 246, 255)
+    Note over W,S: Registration — once, at login (the Start session button here)
+    W->>S: POST /start-form (user clicks Start session)
+    S-->>W: 303 to / + Secure-Session-Registration (algs, path, challenge)<br/>+ Set-Cookie correlation cookie
+    Note over B: Reads the header, generates a device key pair<br/>private key stays in hardware
+    B->>S: POST /dbsc/register (automatic) signed JWT<br/>jwk = public key, jti = challenge
+    Note over S: Verify ES256 sig using the jwk<br/>(prod also checks jti == challenge)<br/>store session_identifier to public key
+    S-->>B: 200 session config + Set-Cookie auth_cookie (20s)
+    end
+
+    rect rgb(240, 255, 244)
+    Note over W,S: Refresh — repeats for the life of the session, automatic, no user action
+    loop every ~cookie lifetime
+        B->>S: POST /dbsc/refresh (Sec-Secure-Session-Id, no proof)
+        S-->>B: 403 Secure-Session-Challenge (new challenge)<br/>unknown session to 404 (drop stale)
+        B->>S: POST /dbsc/refresh (re-signed JWT)<br/>jti = new challenge, NO jwk
+        Note over S: Verify against the STORED key
+        S-->>B: 200 session config + fresh Set-Cookie
+    end
+    end
+
+    rect rgb(255, 245, 245)
+    Note over W,S: App request
+    W->>S: GET /api/protected (user clicks Call protected)
+    S-->>W: authenticated true / false<br/>(false on this macOS + localhost setup, see §5)
+    end
 ```
 
 Plain-text version:
 
 ```
-You → POST /start-form
-Server → 303 /  + Secure-Session-Registration            (invite: algs, path, challenge)
-Chrome makes a device key pair (private key in hardware)
-Chrome → POST /dbsc/register  (Secure-Session-Response = signed JWT;
-                               jwk = public key in header, jti = challenge in claims)
-Server verifies signature via the jwk, stores the public key, → 200 config + Set-Cookie (20s)
-... cookie about to expire ...
-Chrome → POST /dbsc/refresh   (Sec-Secure-Session-Id, no proof)
-Server → 403 + Secure-Session-Challenge   (a new challenge)
-Chrome → POST /dbsc/refresh  (Secure-Session-Response = re-signed JWT;
-                              jti = new challenge, NO jwk — key already stored)
-Server verifies vs stored key, → 200 config + fresh Set-Cookie
+── Registration (once, at "login") ──────────────────────────────────
+You     → POST /start-form
+Server  → 303 to /  + Secure-Session-Registration (algs, path, challenge)
+                    + Set-Cookie (correlation cookie)
+Browser makes a device key pair (private key stays in hardware)
+Browser → POST /dbsc/register   (signed JWT: jwk = public key, jti = challenge)
+Server verifies sig via jwk, stores session_identifier → public key,
+        → 200 session config + Set-Cookie auth_cookie (20s)
+
+── Refresh (repeats every ~cookie lifetime, automatic) ──────────────
+Browser → POST /dbsc/refresh    (Sec-Secure-Session-Id, no proof)
+Server  → 403 + Secure-Session-Challenge (new challenge)   [unknown session → 404, dropped]
+Browser → POST /dbsc/refresh    (re-signed JWT: jti = new challenge, NO jwk)
+Server verifies vs STORED key,  → 200 session config + fresh Set-Cookie
+
+── App request ──────────────────────────────────────────────────────
+You     → GET /api/protected
+Server  → authenticated true / false   (false on macOS + localhost — see §5)
 ```
 
 **What's inside the proof JWT** (a compact JWS — `header.payload.signature`):
