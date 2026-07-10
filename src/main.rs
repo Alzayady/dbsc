@@ -282,12 +282,15 @@ fn session_response(session_id: &str) -> Response {
         "credentials": [{
             "type": "cookie",
             "name": COOKIE_NAME,
-            "attributes": "Path=/; Secure; HttpOnly; SameSite=Strict"
+            "attributes": "Path=/; Secure; HttpOnly; SameSite=Lax"
         }]
     });
 
+    // SameSite=Lax (not Strict): matches the Chrome docs + both reference libs. Lax keeps the
+    // cookie working when the user arrives via an external top-level link; Strict would drop it
+    // on that first navigation (login-UX cost) for no real gain on a hardware-bound cookie.
     let set_cookie = format!(
-        "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Strict"
+        "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Lax"
     );
     println!("  RESPONSE: 200 OK");
     println!("            Set-Cookie: {set_cookie}");
