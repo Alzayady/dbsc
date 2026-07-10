@@ -68,6 +68,18 @@ fn flow_header(n: u8, title: &str) {
     println!("\n════════ FLOW {n}: {title} ════════");
 }
 
+/// The raw incoming `Cookie:` header (what the browser chose to send on THIS request), so we
+/// can see exactly which cookies ride which request — e.g. whether the correlation cookie or
+/// the bound cookie is attached to /dbsc/register, /dbsc/refresh, etc.
+fn cookie_in(headers: &HeaderMap) -> String {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(none)")
+        .to_string()
+}
+
 #[tokio::main]
 async fn main() {
     let state = AppState::default();
@@ -186,6 +198,7 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
     let verified = verify_sig(&signing_input, &sig_b64, &pubkey);
     let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?");
     println!("  REQUEST : POST /dbsc/register");
+    println!("            Cookie: {}", cookie_in(&headers));
     println!("            Secure-Session-Response (JWT): {jwt}");
     println!("            decoded -> jwk=<device public key>, jti={jti}, ES256 verified={verified}");
     // A production server would also check jti == the challenge it issued and
@@ -215,6 +228,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
     let Some(stored_key) = stored_key else {
         flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh)");
         println!("  REQUEST : POST /dbsc/refresh");
+        println!("            Cookie: {}", cookie_in(&headers));
         println!("            Sec-Secure-Session-Id: {session_id}  (unknown to server)");
         println!("  RESPONSE: 404 Not Found   (tells Chrome to drop the stale session)");
         println!("            body: unknown session");
@@ -228,6 +242,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
         let value = format!("\"{challenge}\";id=\"{session_id}\"");
         flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh, no proof)");
         println!("  REQUEST : POST /dbsc/refresh");
+        println!("            Cookie: {}", cookie_in(&headers));
         println!("            Sec-Secure-Session-Id: {session_id}   (no proof yet)");
         println!("  RESPONSE: 403 Forbidden");
         println!("            Secure-Session-Challenge: {value}");
@@ -252,6 +267,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
         None => ("?".to_string(), false),
     };
     println!("  REQUEST : POST /dbsc/refresh");
+    println!("            Cookie: {}", cookie_in(&headers));
     println!("            Sec-Secure-Session-Id: {session_id}");
     println!("            Secure-Session-Response (JWT): {jwt}");
     println!("            decoded -> jti={jti}, no jwk, verified vs STORED key={verified}");
