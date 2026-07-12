@@ -261,6 +261,32 @@ Set-Cookie: dbsc-registration-sessions-id=regid11; Path=/; Max-Age=3600       �
 
 So one is "**where to send the proof**", the other is "**which URLs this cookie is sent for**".
 
+### The correlation cookie is a demo stand-in — production doesn't need it
+
+`dbsc-registration-sessions-id` exists here only because a hello-world has **no real login**. Its
+whole job is to answer *"which logged-in user is this `/dbsc/register` POST?"* — and in a real app
+your **login session cookie already answers that**: it rides the same-origin `/register` request
+automatically (we saw it do exactly that in the logs). So a dedicated correlation cookie is
+**redundant in production** — you'd drop it.
+
+What `/dbsc/register` actually needs, and how the login cookie covers it without a third cookie:
+
+1. **Identify the authenticated user/session** → the **long-lived login cookie** on the request. ✅
+2. **Recover the challenge you issued** (to check the JWT's `jti`) → keep it in **server-side
+   state keyed by the session id** (the "pending registration" record in §9.5) — not in a cookie. ✅
+
+So the cookie counts differ:
+
+| | This demo | Production |
+|---|-----------|------------|
+| Login/session cookie | *(none — no login)* | **long-lived** — auth + identifies the user at `/register` |
+| Correlation cookie | `dbsc-registration-sessions-id` (stand-in) | **not needed** |
+| Bound cookie | `auth_cookie` (short) | `auth_cookie`-equivalent (short) |
+
+**Its `Max-Age` also isn't tied to any auth token:** it only needs to outlive the registration
+handshake (≈ the challenge TTL, minutes) — not the short bound cookie, and not the long login
+session. In production it disappears entirely. *(This demo sets it but never reads it — see §7.)*
+
 ---
 
 ## 4. Setup & run
