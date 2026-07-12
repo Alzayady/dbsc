@@ -160,6 +160,19 @@ these steps and **store** the resulting key. On **refresh there is no `jwk`**, s
 against the **stored** key. That's the anti-theft core: refresh proofs are always checked against
 the key captured once at registration, so only the original device can produce them.
 
+**Why refresh must NOT trust a `jwk` (it would be self-certifying).** This is the crux, worth
+spelling out. Suppose refresh JWTs *did* carry a `jwk` and the server verified against **that**
+attached key. Then a thief who stole the cookie could: generate **their own** key pair → put
+**their** public key in the `jwk` → sign the challenge with **their** private key → and the
+signature verifies against the attached key ✅. The signature would prove only "I own *some*
+key" — meaningless, and anyone could do it. By **ignoring any incoming key and checking against
+the stored one**, only the holder of the **original** device private key (enrolled once, living
+in hardware) can produce a valid refresh — a stolen cookie plus the attacker's own key **fails**.
+That is exactly why the bound cookie can't just be replayed. Mental model: registration *enrolls*
+the key ("remember this public key"); refresh *matches against the enrolled key* — you never
+re-enroll a new key on refresh, or the lock would be meaningless. (This server verifies against
+`stored_key` only; even if a refresh JWT included a `jwk`, it would be ignored.)
+
 ### The session config (the JSON body of Flows 2 & 4)
 
 The `200` response to register **and** refresh carries a JSON **session config** — the server's
