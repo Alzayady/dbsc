@@ -196,16 +196,36 @@ fresh; when it's about to expire, POST to **`refresh_url`** with **`session_iden
 new cookie, carry on."* That's what makes the register/refresh loop self-sustaining — the config
 is returned on **both** register and refresh so Chrome always holds the current instructions.
 
-### The three IDs (and how long each lives) — don't mix them up
+### Every id / value and how long it lives — don't mix them up
 
-DBSC juggles three different identifiers. Confusing them is the #1 source of "wait, which id
-is this?" — here's each, side by side:
+DBSC juggles several ids and values with **very different lifetimes**. Confusing them is the #1
+source of "wait, which one is this?" Here they all are, grouped by lifetime:
 
-| Identifier | Example | Changes? | What it's for |
-|------------|---------|----------|---------------|
-| **`session_identifier`** (the "session id") | `sess12` | **Stable for the whole login session** — same across every refresh | The handle the server uses to find the **stored device key** for a session. Chrome sends it back on each refresh (`Sec-Secure-Session-Id`). |
-| **bound cookie value** | `cookie13` → `cookie15` → … | **Rotates on every refresh** (must!) | The short-lived, device-bound **credential** itself. Re-emitting the old value makes Chrome think no refresh happened and drop the session. |
-| **correlation cookie** (`dbsc-registration-sessions-id`) | `regid11` | Set once at the trigger | Links the register POST back to the login. This demo *sets* it but doesn't *read* it (see §7). |
+| Value | Example | Born when | Rotates? | Lives for | Whole session? |
+|-------|---------|-----------|----------|-----------|:---:|
+| **device key** (public stored server-side; private in hardware) | — | Registration (Flow 2) | No | **the whole login session** | ✅ |
+| **`session_identifier`** (the "session id") | `sess3` | Registration (Flow 2) | No — stable | **the whole login session** | ✅ |
+| *(production)* **login/session cookie** ("auth token") | — | Login | No (maybe rotated) | **the whole login session** | ✅ |
+| **bound cookie value** (`auth_cookie`) | `cookie4` → `cookie6` → … | Every register **and** refresh | **Yes — every refresh** | ~one refresh cycle (`Max-Age=20s`) | ❌ |
+| **refresh challenge** | `refchal5` → `refchal7` | Every refresh (`403`) | **Yes — every refresh**, single-use | until used / next refresh (< challenge TTL) | ❌ |
+| **registration challenge** | `chal1` | Flow 1 invite | One-time | just the registration handshake | ❌ |
+| **correlation cookie** (`dbsc-registration-sessions-id`) | `regid2` | Flow 1 | One-time | registration window (minutes); **gone in prod** | ❌ |
+
+Read it as three tiers:
+
+- **Lives the whole session (the "anchors"):** the **device key** (the real anchor — everything
+  is verified against it), its stable handle **`session_identifier`**, and in production the
+  **login cookie**. These persist across every refresh, tab close, and multi-day return.
+- **Rotates on every refresh (the security churn):** the **bound cookie value** and the **refresh
+  challenge**. Being short-lived and single-use is the *point* — it's what makes a stolen cookie
+  useless within seconds.
+- **One-time / setup only:** the **registration challenge** (signed once) and the **correlation
+  cookie** (bridges login→register during setup; doesn't exist in production).
+
+**The key insight:** the thing that persists all session is **not a secret you send around** — it's
+the **device key** (plus its handle and, in prod, the login cookie). The credential that actually
+travels (the bound cookie) and the challenge are deliberately **short-lived and rotating**. That's
+the whole DBSC trick: *a permanent hardware anchor issuing ever-changing, disposable credentials.*
 
 #### What "the session id is stable" really means
 
