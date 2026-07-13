@@ -327,9 +327,10 @@ fn session_response(session_id: &str) -> Response {
         "session_identifier": session_id,
         "refresh_url": "/dbsc/refresh",
         // Scope = which requests Chrome manages the bound cookie for. include_site:false =
-        // this origin only. We omit scope_specification (matching report-uri/dbsc-php) so Chrome
-        // manages the cookie for ALL paths on the origin by default — an explicit include rule
-        // here appeared to stop the bound cookie being injected into app navigations (see §5).
+        // this origin only; omitting scope_specification (like report-uri/dbsc-php) means Chrome
+        // manages the cookie for ALL paths on the origin by default. (An explicit include rule
+        // also works — it was never the problem; the delivery bug was reading only the first
+        // Cookie header, see §5.)
         "scope": {
             "origin": cfg().origin.as_str(),
             "include_site": false
