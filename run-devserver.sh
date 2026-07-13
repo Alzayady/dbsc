@@ -5,15 +5,24 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Cargo needs the fwdproxy to reach crates.io on a devserver (else the build hangs).
-feature install ttls_fwdproxy >/dev/null 2>&1 || echo ">> (couldn't auto-install ttls_fwdproxy; if cargo hangs fetching crates, run: feature install ttls_fwdproxy)"
+# Devserver internet egress goes through fwdproxy — the box can't resolve external hosts
+# directly, so point curl/rustup/cargo at it (fixes "Could not resolve host sh.rustup.rs").
+export http_proxy="${http_proxy:-http://fwdproxy:8080}"
+export https_proxy="${https_proxy:-http://fwdproxy:8080}"
+export HTTP_PROXY="$http_proxy" HTTPS_PROXY="$https_proxy"
+export no_proxy="${no_proxy:-.facebook.com,.fbinfra.net,localhost,127.0.0.1,::1}"
 
-# Ensure a Rust toolchain.
-if ! command -v cargo >/dev/null 2>&1; then
-  echo ">> Installing Rust (rustup)…"
+# Ensure a Rust toolchain (downloads via the proxy above if missing).
+if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+  echo ">> Installing Rust (rustup) via fwdproxy…"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 fi
 source "$HOME/.cargo/env" 2>/dev/null || true
+
+# Make cargo fetch crates through the proxy too.
+mkdir -p "$HOME/.cargo"
+grep -q fwdproxy "$HOME/.cargo/config.toml" 2>/dev/null \
+  || printf '[http]\nproxy = "http://fwdproxy:8080"\n' >> "$HOME/.cargo/config.toml"
 
 # Point the app at the host cert + a 442xx HTTPS port, bound on IPv6 (see README §10 gotchas).
 H="$(hostname)"; S="${H%%.*}"
