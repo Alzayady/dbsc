@@ -33,13 +33,12 @@ use std::{
 };
 
 /// Runtime config (env-overridable) so the *same* binary works both locally (mkcert cert on
-/// `localhost`) and on an internal Meta devserver (Secure Web Apps: host cert on a
-/// `*.fbinfra.net:442xx` HTTPS port). Defaults reproduce the local setup, so `cargo run` is
-/// unchanged. See the "Deploy to an internal HTTPS domain" section in the README.
+/// `localhost`) and behind a real HTTPS domain (point the vars at that host's cert and origin).
+/// Defaults reproduce the local setup, so `cargo run` is unchanged.
 struct Config {
-    origin: String,      // DBSC_ORIGIN      — browser-facing origin, e.g. https://myhost.fbinfra.net:44200
-    host: String,        // DBSC_HOST        — cookie/scope domain, e.g. myhost.fbinfra.net
-    bind: String,        // DBSC_BIND        — socket to listen on, e.g. [::]:44200
+    origin: String,      // DBSC_ORIGIN      — browser-facing origin, e.g. https://example.com
+    host: String,        // DBSC_HOST        — cookie/scope domain, e.g. example.com
+    bind: String,        // DBSC_BIND        — socket to listen on, e.g. [::]:8443
     tls_cert: String,    // DBSC_TLS_CERT    — PEM cert path
     tls_key: String,     // DBSC_TLS_KEY     — PEM key path
     cookie_name: String, // DBSC_COOKIE_NAME — the device-bound cookie's name (default auth_cookie)
@@ -102,10 +101,9 @@ fn cookie_in(headers: &HeaderMap) -> String {
 
 #[tokio::main]
 async fn main() {
-    // Env-overridable config; defaults = the local mkcert setup. On an internal devserver:
-    //   DBSC_ORIGIN=https://<host>.fbinfra.net:44200  DBSC_HOST=<host>.fbinfra.net
-    //   DBSC_BIND=[::]:44200
-    //   DBSC_TLS_CERT=/etc/pki/tls/certs/<host>.crt   DBSC_TLS_KEY=/etc/pki/tls/certs/<host>.key
+    // Env-overridable config; defaults = the local mkcert setup. To serve behind a real HTTPS
+    // domain, set: DBSC_ORIGIN=https://<host> · DBSC_HOST=<host> · DBSC_BIND=[::]:<port> ·
+    // DBSC_TLS_CERT / DBSC_TLS_KEY = that host's cert/key paths.
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
     let _ = CONFIG.set(Config {
         origin: env("DBSC_ORIGIN", "https://localhost:3000"),
@@ -131,7 +129,7 @@ async fn main() {
         .expect("failed to install rustls ring provider");
 
     // DBSC only engages over real TLS. Locally these are the files mkcert produces
-    // (`mkcert localhost 127.0.0.1 ::1`); on a devserver point DBSC_TLS_CERT/KEY at the host cert.
+    // (`mkcert localhost 127.0.0.1 ::1`); behind a real domain point DBSC_TLS_CERT/KEY at its cert.
     let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cfg().tls_cert, &cfg().tls_key)
         .await
         .expect(
@@ -141,7 +139,7 @@ async fn main() {
              (or set DBSC_TLS_CERT / DBSC_TLS_KEY to your cert paths).",
         );
 
-    let addr: std::net::SocketAddr = cfg().bind.parse().expect("invalid DBSC_BIND (e.g. [::]:44200)");
+    let addr: std::net::SocketAddr = cfg().bind.parse().expect("invalid DBSC_BIND (e.g. [::]:8443)");
     println!("\n=== DBSC hello-world (HTTPS) ===");
     println!("Open  {}  in Chrome (with the DBSC flags from README enabled).", cfg().origin);
     println!("Keep DevTools -> Network open to watch the Secure-Session-* handshake.\n");
