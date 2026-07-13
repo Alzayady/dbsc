@@ -47,10 +47,10 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 fn cfg() -> &'static Config {
     CONFIG.get().expect("CONFIG not initialized (set in main before serving)")
 }
-/// Bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). Deliberately
-/// short so you can watch Chrome auto-refresh it. (We tested `120` too: `/api/protected` still
-/// showed `authenticated=false`, so the missing bound cookie is NOT an expiry race — see §5.)
-const COOKIE_MAX_AGE_SECS: u64 = 20;
+/// Bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). Set to 300 (5 min)
+/// to match report-uri/dbsc-php and keep the cookie reliably present when you click a protected
+/// page (a 20s cookie is often expired at click time). Lower it to watch refreshes more often.
+const COOKIE_MAX_AGE_SECS: u64 = 300;
 
 /// An EC P-256 public key (base64url X/Y coordinates), as carried in a device JWT's `jwk`.
 #[derive(Clone)]
@@ -315,15 +315,13 @@ fn session_response(session_id: &str) -> Response {
     let config = json!({
         "session_identifier": session_id,
         "refresh_url": "/dbsc/refresh",
-        // Scope = which requests Chrome manages the bound cookie for. include_site:false
-        // = this origin only; the single include rule covers all paths. The refresh_url
-        // is auto-excluded by the browser.
+        // Scope = which requests Chrome manages the bound cookie for. include_site:false =
+        // this origin only. We omit scope_specification (matching report-uri/dbsc-php) so Chrome
+        // manages the cookie for ALL paths on the origin by default — an explicit include rule
+        // here appeared to stop the bound cookie being injected into app navigations (see §5).
         "scope": {
             "origin": cfg().origin.as_str(),
-            "include_site": false,
-            "scope_specification": [
-                { "type": "include", "domain": cfg().host.as_str(), "path": "/" }
-            ]
+            "include_site": false
         },
         // The cookie Chrome treats as device-bound. Host-only (no Domain) + Secure +
         // HttpOnly, matching the production reference lib (report-uri/dbsc-php). A fresh
