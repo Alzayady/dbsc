@@ -133,7 +133,6 @@ async fn main() {
         .route("/dbsc/register", post(register))
         .route("/dbsc/refresh", post(refresh))
         .route("/api/protected", get(protected))
-        .route("/protected-page", get(protected_page))
         .with_state(state);
 
     // rustls 0.23 needs a process-wide crypto provider chosen explicitly.
@@ -365,53 +364,15 @@ fn session_response(session_id: &str) -> Response {
     (StatusCode::OK, out, Json(config)).into_response()
 }
 
-/// A "protected" endpoint: reports whether the device-bound cookie was sent with the request.
+/// A "protected" endpoint: reports whether the device-bound cookie rode the request.
 async fn protected(headers: HeaderMap) -> Response {
     let _log = LOG_LOCK.lock().unwrap();
     let cookie = cookie_in(&headers);
     let authed = has_bound_cookie(&headers);
     flow_header(5, "PROTECTED  (GET /api/protected)");
-    println!("  REQUEST : GET /api/protected");
-    println!("            {} Cookie header(s): {cookie}", headers.get_all(header::COOKIE).iter().count());
-    println!("  RESPONSE: 200 OK");
-    println!("            body: {{\"authenticated\":{authed},\"cookie_header\":{cookie:?}}}");
+    println!("  REQUEST : GET /api/protected  |  Cookie: {cookie}");
+    println!("  RESPONSE: authenticated={authed}");
     Json(json!({ "authenticated": authed, "cookie_header": cookie })).into_response()
-}
-
-/// Same check as `/api/protected`, but reached by a **top-level navigation** (a real `<a href>`)
-/// instead of `fetch()`. Both receive the device-bound cookie (Chrome delivers it to app requests
-/// on macOS) — we kept both routes only to show that request type does NOT matter. The reason an
-/// earlier version showed `false` was a bug here: cookies arrive in MULTIPLE `Cookie` headers and
-/// we read only the first with `.get()`; `has_bound_cookie` now reads them all (§5).
-async fn protected_page(headers: HeaderMap) -> Response {
-    let _log = LOG_LOCK.lock().unwrap();
-    let cookie = cookie_in(&headers);
-    let authed = has_bound_cookie(&headers);
-    flow_header(6, "PROTECTED PAGE  (GET /protected-page — navigation, not fetch)");
-    println!("  REQUEST : GET /protected-page   (top-level navigation)");
-    // Print EVERY raw Cookie header separately (there can be more than one) before parsing,
-    // so we can see exactly what arrived and whether the bound cookie is in a second header.
-    let raw: Vec<&str> = headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .collect();
-    println!("            raw Cookie header count = {}", raw.len());
-    for (i, h) in raw.iter().enumerate() {
-        println!("            Cookie[{i}]: {h}");
-    }
-    println!("            looking for cookie named: {}", cfg().cookie_name);
-    println!("  RESPONSE: 200 OK  |  authenticated={authed}");
-    let html = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Protected (navigation)</title>\
-         <body style=\"font:15px/1.5 system-ui;max-width:720px;margin:40px auto;padding:0 16px\">\
-         <h1>Protected page (navigation)</h1>\
-         <p>Reached by a <b>top-level navigation</b> (a real link) — not <code>fetch()</code>.</p>\
-         <p>Device-bound cookie delivered: <b>{authed}</b></p>\
-         <pre style=\"background:#111;color:#b7f;padding:12px;border-radius:8px;white-space:pre-wrap\">Cookie: {cookie}</pre>\
-         <p><a href=\"/\">&larr; back</a></p></body>"
-    );
-    (StatusCode::OK, Html(html)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -502,9 +463,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <li><b>Start session</b> submits a form to <code>/start-form</code>; the browser then
         automatically POSTs <code>/dbsc/register</code> and later <code>/dbsc/refresh</code>.
         Watch the terminal.</li>
-    <li><b>Call protected (fetch)</b> and <b>Open protected page (navigation)</b> both check
-        whether the device-bound cookie rode the request. Both show <code>authenticated=true</code>
-        once a session is registered — the bound cookie is delivered to app requests (see §5).</li>
+    <li><b>Call protected</b> checks whether the device-bound cookie rode the request —
+        <code>authenticated=true</code> once a session is registered.</li>
   </ol>
   <p>
     <!-- This is a real form-POST navigation (so the page reloads) ON PURPOSE. The
@@ -514,8 +474,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <form method="POST" action="/start-form" style="display:inline">
       <button type="submit">Start session</button>
     </form>
-    <button onclick="callProtected()">Call protected (fetch)</button>
-    <a href="/protected-page"><button type="button">Open protected page (navigation)</button></a>
+    <button onclick="callProtected()">Call protected</button>
   </p>
   <pre id="log">(server log is in your terminal; browser log here)</pre>
 <script>
