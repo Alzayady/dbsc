@@ -437,13 +437,20 @@ old persisted DBSC sessions before a fresh run.
   request at all; a fuller multi-refresh trace showed it DOES reach `/dbsc/refresh`, just not the
   app request.)*
 
+  **`localhost` is also ruled out (tested).** We deployed this exact server to a **real,
+  browser-trusted internal HTTPS domain** (`https://devvm…lla0.fbinfra.net:44200`, via Meta's
+  Secure Web Apps — see §10), valid cert, DBSC handshake verifying end-to-end. On **macOS Chrome
+  it was still `authenticated=false`** — the bound cookie still isn't injected into app requests.
+  So a real domain vs. `localhost` makes **no difference on macOS**; the blocker is the
+  **client-side macOS path**, not the origin.
+
   **Ruled out (things we tried that made no difference):** `fetch()` vs. top-level
   navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; the strict
   **`__Host-` prefix** (`Secure` + `HttpOnly`, no `Domain`, per
   [RFC 6265bis §4.1.3.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-05#section-4.1.3.2));
-  and **cookie lifetime** (`Max-Age=20` vs `120` — expiry is not the cause).
-  None changed delivery — which is strong evidence the blocker is **not** a cookie-attribute
-  problem but the testing path below.
+  **cookie lifetime** (`Max-Age=20` vs `120` — expiry is not the cause); and **`localhost` vs. a
+  real internal HTTPS domain** (still `false` on macOS). None changed delivery — strong evidence
+  the blocker is **not** a cookie-attribute or origin problem but the client testing path below.
 
 ### Why (best current understanding)
 DBSC's *public* rollout is Windows-first; **macOS is still "manual testing"**, which
