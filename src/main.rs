@@ -35,7 +35,9 @@ use std::{
 const ORIGIN: &str = "https://localhost:3000";
 const HOST: &str = "localhost";
 const COOKIE_NAME: &str = "auth_cookie";
-/// Deliberately short so you can watch Chrome auto-refresh it.
+/// Bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). Deliberately
+/// short so you can watch Chrome auto-refresh it. (We tested `120` too: `/api/protected` still
+/// showed `authenticated=false`, so the missing bound cookie is NOT an expiry race — see §5.)
 const COOKIE_MAX_AGE_SECS: u64 = 20;
 
 /// An EC P-256 public key (base64url X/Y coordinates), as carried in a device JWT's `jwk`.
@@ -53,6 +55,11 @@ struct AppState {
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Serializes each handler's multi-line log block so concurrent requests (Chrome fires many
+/// refreshes at once) don't interleave their output. Held for the whole handler — there is no
+/// `.await` inside any handler after it's taken, so the guard never crosses an await point.
+static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Unique, short, alphanumeric id/challenge for the demo (NOT cryptographically strong).
 /// Chrome is picky about the challenge, so we avoid underscores / huge values.
@@ -151,6 +158,7 @@ fn registration_header() -> (HeaderName, HeaderValue) {
 /// carrying `Secure-Session-Registration` plus a correlation cookie. This specific
 /// response shape (form POST → 303) is what Chrome acts on to start registration.
 async fn start_form() -> Response {
+    let _log = LOG_LOCK.lock().unwrap();
     let (reg_name, reg_value) = registration_header();
     let reg_id = nonce("regid");
     let set_cookie = format!("dbsc-registration-sessions-id={reg_id}; Path=/; Max-Age=3600");
@@ -173,6 +181,7 @@ async fn start_form() -> Response {
 /// its `jwk` header; we verify the signature (proof-of-possession), store the key against
 /// a new session, and return the session config + a short-lived bound cookie.
 async fn register(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    let _log = LOG_LOCK.lock().unwrap();
     flow_header(2, "REGISTER  (POST /dbsc/register)");
 
     let Some(jwt) = jwt_from(&headers, &body) else {
@@ -214,6 +223,7 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
 /// First call has no proof -> we reply 403 + a challenge; Chrome re-signs (with the SAME
 /// device key) and retries -> we verify against the STORED key and re-mint the cookie.
 async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    let _log = LOG_LOCK.lock().unwrap();
     // Session id arrives in `Sec-Secure-Session-Id` on refresh.
     let session_id = headers
         .get("sec-secure-session-id")
@@ -322,6 +332,7 @@ fn session_response(session_id: &str) -> Response {
 
 /// A "protected" endpoint: reports whether the device-bound cookie was sent with the request.
 async fn protected(headers: HeaderMap) -> Response {
+    let _log = LOG_LOCK.lock().unwrap();
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())

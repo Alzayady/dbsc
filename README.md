@@ -406,21 +406,25 @@ old persisted DBSC sessions before a fresh run.
   are dropped instead of causing a refresh storm.
 
 ### ❌ Doesn't work on this setup
-- **`/api/protected` shows `authenticated=false`.** The device-bound `auth_cookie` is **never
-  attached to any request** — not our page's `/api/protected`, and **not even** Chrome's own
-  `/dbsc/refresh` (which identifies the session via `Sec-Secure-Session-Id`, not the cookie).
-  Chrome keeps re-refreshing but never delivers the bound cookie to a request.
-  **What this rules in:** ordinary cookies work fine on this origin — the plain
-  `dbsc-registration-sessions-id` correlation cookie rides *every* request (register, refresh,
-  **and** `/api/protected`, visible in the logs). So the blocker is specific to the
-  **DBSC-managed** cookie, not cookies in general. *(An earlier version of this note claimed the
-  bound cookie was delivered to `/dbsc/refresh`; logging the incoming `Cookie:` header on every
-  flow showed it isn't — the correlation cookie is the only cookie on those requests.)*
+- **`/api/protected` shows `authenticated=false`.** The device-bound `auth_cookie` **is**
+  delivered to Chrome's own `/dbsc/refresh` requests (`Cookie: auth_cookie=…` shows up on many of
+  them in the logs) but is **never** injected into our page's `/api/protected` request — which
+  only ever carries the plain `dbsc-registration-sessions-id` cookie. So the app request can't
+  see the bound cookie → `authenticated=false`.
+  **Expiry is ruled out:** we retested with `Max-Age=120` (a 2-minute cookie) clicked
+  immediately — still `false`, so it isn't a timing/expiry race. Ordinary cookies also work fine
+  on this origin (the correlation cookie rides *every* request). So the blocker is specifically
+  Chrome **injecting the DBSC-managed cookie into normal app requests** — the "last mile" that
+  doesn't complete on the macOS software-keys/localhost testing path. *(Honest trail: this note
+  was corrected twice as more logging arrived — first we thought the bound cookie reached no
+  request at all; a fuller multi-refresh trace showed it DOES reach `/dbsc/refresh`, just not the
+  app request.)*
 
   **Ruled out (things we tried that made no difference):** `fetch()` vs. top-level
-  navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; and the strict
+  navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; the strict
   **`__Host-` prefix** (`Secure` + `HttpOnly`, no `Domain`, per
-  [RFC 6265bis §4.1.3.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-05#section-4.1.3.2)).
+  [RFC 6265bis §4.1.3.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-05#section-4.1.3.2));
+  and **cookie lifetime** (`Max-Age=20` vs `120` — expiry is not the cause).
   None changed delivery — which is strong evidence the blocker is **not** a cookie-attribute
   problem but the testing path below.
 
