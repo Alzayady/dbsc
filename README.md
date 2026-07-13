@@ -727,3 +727,57 @@ robustness/observability on top.
 > cookie value each refresh **without** persisting it, use a monotonic counter instead of random
 > challenges, and never check `jti` — which is why the code says "log & continue" instead of
 > enforcing. §9.2 + this table together are the gap between the demo and a real server.
+
+---
+
+## 10. Deploy to a real (internal) HTTPS domain to test cookie delivery
+
+§5 showed the bound cookie isn't delivered to app requests on the **macOS + `localhost`**
+testing path. To retest on a **real, browser-trusted HTTPS origin** without AWS/domains/cost, use
+Meta's **Secure Web Apps (VPNLess WWW)**: run the server on a **devserver** on an HTTPS port in
+the **442xx** range, and corp Chrome reaches it at `https://<host>.fbinfra.net:442xx` with a cert
+it already trusts — **on both macOS and Windows, VPN-less**.
+
+The server is env-configurable (defaults = the local mkcert setup), so no code fork is needed.
+
+**On a devserver:**
+```bash
+# 1. Get the code onto the devserver (rsync from your laptop, or clone your repo), then:
+cd dbsc_hello
+# (install Rust if needed: feature install rust  — or rustup)
+
+# 2. Point the app at the host cert + a 442xx HTTPS port, bound on IPv6.
+H=$(hostname)                       # e.g. devvm1234.abc0.facebook.com
+export DBSC_BIND="[::]:44200"       # 442xx = HTTPS range; bind [::] (IPv6!), not 127.0.0.1
+export DBSC_TLS_CERT="/etc/pki/tls/certs/${H}.crt"
+export DBSC_TLS_KEY="/etc/pki/tls/certs/${H}.key"
+export DBSC_ORIGIN="https://${H%%.*}.fbinfra.net:44200"   # note: .fbinfra.net, NOT .facebook.com
+export DBSC_HOST="${H%%.*}.fbinfra.net"
+
+# 3. Run it.
+cargo run
+```
+
+**Then open** `https://<host>.fbinfra.net:44200` in Chrome (with the same DBSC flags from §4).
+First try macOS, then **Windows** (see below).
+
+### Gotchas (these will bite)
+- **442xx = HTTPS** (your app serves TLS, which it does), **441xx = plain HTTP**. Wrong range → the
+  extension shows "Error loading" even though the server logs a 200. DBSC needs HTTPS → **442xx**.
+- **Bind `[::]` (IPv6), not `127.0.0.1`** — devserver DNS/routing is IPv6-first; IPv4 loopback →
+  `ERR_CONNECTION_TIMED_OUT`.
+- **In the browser use `.fbinfra.net`, not `.facebook.com`** (that synthetic hostname is what the
+  extension intercepts). `.facebook.com` is only for SSH.
+- If the tunnel errors: `kinit && fb-sks-agent renew`, then `fb-sks-agent status` (confirm `X2P`).
+- OnDemand can't use `ssh -L`; Secure Web Apps is the supported route. A **devserver** is simplest.
+
+### The decisive variable is still the client
+A real internal HTTPS origin removes the `localhost` variable — but the blocker is most likely the
+**macOS software-keys/manual-testing path**, which is client-side. So from **this same macOS
+Chrome it may still show `authenticated=false`**. Seeing `authenticated=true` most likely needs
+**Windows Chrome** (DBSC is GA there, Chrome 146+) pointed at the same `https://<host>.fbinfra.net:44200`.
+Testing from **both** macOS and Windows against the one URL pinpoints exactly which variable mattered.
+
+### Internal references
+- Secure Web Apps: <https://www.internalfb.com/wiki/NISE/Secure_Channels/VPNLess_WWW_Chrome_Extension/Secure_Web_Apps/>
+- Meta's internal DBSC wiki + live prototype: <https://www.internalfb.com/wiki/Web-secure-frameworks/Device_Bound_Session_Credentials/> · <https://www.internalfb.com/intern/dbsc-test/>

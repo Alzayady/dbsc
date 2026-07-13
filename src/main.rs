@@ -28,13 +28,27 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
 };
 
-const ORIGIN: &str = "https://localhost:3000";
-const HOST: &str = "localhost";
 const COOKIE_NAME: &str = "auth_cookie";
+
+/// Runtime config (env-overridable) so the *same* binary works both locally (mkcert cert on
+/// `localhost`) and on an internal Meta devserver (Secure Web Apps: host cert on a
+/// `*.fbinfra.net:442xx` HTTPS port). Defaults reproduce the local setup, so `cargo run` is
+/// unchanged. See the "Deploy to an internal HTTPS domain" section in the README.
+struct Config {
+    origin: String,   // DBSC_ORIGIN   — browser-facing origin, e.g. https://myhost.fbinfra.net:44200
+    host: String,     // DBSC_HOST     — cookie/scope domain, e.g. myhost.fbinfra.net
+    bind: String,     // DBSC_BIND     — socket to listen on, e.g. [::]:44200
+    tls_cert: String, // DBSC_TLS_CERT — PEM cert path
+    tls_key: String,  // DBSC_TLS_KEY  — PEM key path
+}
+static CONFIG: OnceLock<Config> = OnceLock::new();
+fn cfg() -> &'static Config {
+    CONFIG.get().expect("CONFIG not initialized (set in main before serving)")
+}
 /// Bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). Deliberately
 /// short so you can watch Chrome auto-refresh it. (We tested `120` too: `/api/protected` still
 /// showed `authenticated=false`, so the missing bound cookie is NOT an expiry race — see §5.)
@@ -89,6 +103,19 @@ fn cookie_in(headers: &HeaderMap) -> String {
 
 #[tokio::main]
 async fn main() {
+    // Env-overridable config; defaults = the local mkcert setup. On an internal devserver:
+    //   DBSC_ORIGIN=https://<host>.fbinfra.net:44200  DBSC_HOST=<host>.fbinfra.net
+    //   DBSC_BIND=[::]:44200
+    //   DBSC_TLS_CERT=/etc/pki/tls/certs/<host>.crt   DBSC_TLS_KEY=/etc/pki/tls/certs/<host>.key
+    let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+    let _ = CONFIG.set(Config {
+        origin: env("DBSC_ORIGIN", "https://localhost:3000"),
+        host: env("DBSC_HOST", "localhost"),
+        bind: env("DBSC_BIND", "127.0.0.1:3000"),
+        tls_cert: env("DBSC_TLS_CERT", "localhost+2.pem"),
+        tls_key: env("DBSC_TLS_KEY", "localhost+2-key.pem"),
+    });
+
     let state = AppState::default();
     let app = Router::new()
         .route("/", get(index))
@@ -103,22 +130,20 @@ async fn main() {
         .install_default()
         .expect("failed to install rustls ring provider");
 
-    // DBSC only engages over real TLS. These are the files mkcert produces:
-    //   mkcert localhost 127.0.0.1 ::1
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-        "localhost+2.pem",
-        "localhost+2-key.pem",
-    )
-    .await
-    .expect(
-        "TLS certs not found. In this dir run:\n  \
-         brew install mkcert && mkcert -install\n  \
-         mkcert localhost 127.0.0.1 ::1",
-    );
+    // DBSC only engages over real TLS. Locally these are the files mkcert produces
+    // (`mkcert localhost 127.0.0.1 ::1`); on a devserver point DBSC_TLS_CERT/KEY at the host cert.
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cfg().tls_cert, &cfg().tls_key)
+        .await
+        .expect(
+            "TLS certs not found. Locally run:\n  \
+             brew install mkcert && mkcert -install\n  \
+             mkcert localhost 127.0.0.1 ::1\n  \
+             (or set DBSC_TLS_CERT / DBSC_TLS_KEY to your cert paths).",
+        );
 
-    let addr: std::net::SocketAddr = "127.0.0.1:3000".parse().unwrap();
+    let addr: std::net::SocketAddr = cfg().bind.parse().expect("invalid DBSC_BIND (e.g. [::]:44200)");
     println!("\n=== DBSC hello-world (HTTPS) ===");
-    println!("Open  {ORIGIN}  in Chrome (with the DBSC flags from README enabled).");
+    println!("Open  {}  in Chrome (with the DBSC flags from README enabled).", cfg().origin);
     println!("Keep DevTools -> Network open to watch the Secure-Session-* handshake.\n");
     axum_server::bind_rustls(addr, config)
         .serve(app.into_make_service())
@@ -295,10 +320,10 @@ fn session_response(session_id: &str) -> Response {
         // = this origin only; the single include rule covers all paths. The refresh_url
         // is auto-excluded by the browser.
         "scope": {
-            "origin": ORIGIN,
+            "origin": cfg().origin.as_str(),
             "include_site": false,
             "scope_specification": [
-                { "type": "include", "domain": HOST, "path": "/" }
+                { "type": "include", "domain": cfg().host.as_str(), "path": "/" }
             ]
         },
         // The cookie Chrome treats as device-bound. Host-only (no Domain) + Secure +
