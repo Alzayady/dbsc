@@ -777,7 +777,6 @@ origin:
 
 ```bash
 export DBSC_ORIGIN="https://example.com"        # your real, browser-facing origin
-export DBSC_HOST="example.com"                   # cookie/scope domain
 export DBSC_BIND="[::]:8443"                      # socket to listen on
 export DBSC_TLS_CERT="/path/to/fullchain.pem"    # a cert Chrome already trusts (e.g. Let's Encrypt)
 export DBSC_TLS_KEY="/path/to/privkey.pem"

@@ -37,7 +37,6 @@ use std::{
 /// Defaults reproduce the local setup, so `cargo run` is unchanged.
 struct Config {
     origin: String,      // DBSC_ORIGIN      — browser-facing origin, e.g. https://example.com
-    host: String,        // DBSC_HOST        — cookie/scope domain, e.g. example.com
     bind: String,        // DBSC_BIND        — socket to listen on, e.g. [::]:8443
     tls_cert: String,    // DBSC_TLS_CERT    — PEM cert path
     tls_key: String,     // DBSC_TLS_KEY     — PEM key path
@@ -102,12 +101,11 @@ fn cookie_in(headers: &HeaderMap) -> String {
 #[tokio::main]
 async fn main() {
     // Env-overridable config; defaults = the local mkcert setup. To serve behind a real HTTPS
-    // domain, set: DBSC_ORIGIN=https://<host> · DBSC_HOST=<host> · DBSC_BIND=[::]:<port> ·
+    // domain, set: DBSC_ORIGIN=https://<host> · DBSC_BIND=[::]:<port> ·
     // DBSC_TLS_CERT / DBSC_TLS_KEY = that host's cert/key paths.
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
     let _ = CONFIG.set(Config {
         origin: env("DBSC_ORIGIN", "https://localhost:3000"),
-        host: env("DBSC_HOST", "localhost"),
         bind: env("DBSC_BIND", "127.0.0.1:3000"),
         tls_cert: env("DBSC_TLS_CERT", "localhost+2.pem"),
         tls_key: env("DBSC_TLS_KEY", "localhost+2-key.pem"),
