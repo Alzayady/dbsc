@@ -34,6 +34,7 @@ export DBSC_TLS_CERT="/etc/pki/tls/certs/${H}.crt"
 export DBSC_TLS_KEY="/etc/pki/tls/certs/${H}.key"
 export DBSC_ORIGIN="https://${FBINFRA}:44200"
 export DBSC_HOST="${FBINFRA}"
+export DBSC_COOKIE_NAME="auth_cookie"   # <- change to try a different bound-cookie name, then redeploy
 
 echo ">> DBSC_ORIGIN = $DBSC_ORIGIN"
 echo ">> Open that URL in Chrome (macOS first, then Windows). Ctrl-C to stop."

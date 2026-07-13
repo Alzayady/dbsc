@@ -32,18 +32,17 @@ use std::{
     },
 };
 
-const COOKIE_NAME: &str = "auth_cookie";
-
 /// Runtime config (env-overridable) so the *same* binary works both locally (mkcert cert on
 /// `localhost`) and on an internal Meta devserver (Secure Web Apps: host cert on a
 /// `*.fbinfra.net:442xx` HTTPS port). Defaults reproduce the local setup, so `cargo run` is
 /// unchanged. See the "Deploy to an internal HTTPS domain" section in the README.
 struct Config {
-    origin: String,   // DBSC_ORIGIN   — browser-facing origin, e.g. https://myhost.fbinfra.net:44200
-    host: String,     // DBSC_HOST     — cookie/scope domain, e.g. myhost.fbinfra.net
-    bind: String,     // DBSC_BIND     — socket to listen on, e.g. [::]:44200
-    tls_cert: String, // DBSC_TLS_CERT — PEM cert path
-    tls_key: String,  // DBSC_TLS_KEY  — PEM key path
+    origin: String,      // DBSC_ORIGIN      — browser-facing origin, e.g. https://myhost.fbinfra.net:44200
+    host: String,        // DBSC_HOST        — cookie/scope domain, e.g. myhost.fbinfra.net
+    bind: String,        // DBSC_BIND        — socket to listen on, e.g. [::]:44200
+    tls_cert: String,    // DBSC_TLS_CERT    — PEM cert path
+    tls_key: String,     // DBSC_TLS_KEY     — PEM key path
+    cookie_name: String, // DBSC_COOKIE_NAME — the device-bound cookie's name (default auth_cookie)
 }
 static CONFIG: OnceLock<Config> = OnceLock::new();
 fn cfg() -> &'static Config {
@@ -114,6 +113,7 @@ async fn main() {
         bind: env("DBSC_BIND", "127.0.0.1:3000"),
         tls_cert: env("DBSC_TLS_CERT", "localhost+2.pem"),
         tls_key: env("DBSC_TLS_KEY", "localhost+2-key.pem"),
+        cookie_name: env("DBSC_COOKIE_NAME", "auth_cookie"),
     });
 
     let state = AppState::default();
@@ -332,7 +332,7 @@ fn session_response(session_id: &str) -> Response {
         // think "no refresh happened" and drop the session).
         "credentials": [{
             "type": "cookie",
-            "name": COOKIE_NAME,
+            "name": cfg().cookie_name.as_str(),
             "attributes": "Path=/; Secure; HttpOnly; SameSite=Lax"
         }]
     });
@@ -341,7 +341,8 @@ fn session_response(session_id: &str) -> Response {
     // cookie working when the user arrives via an external top-level link; Strict would drop it
     // on that first navigation (login-UX cost) for no real gain on a hardware-bound cookie.
     let set_cookie = format!(
-        "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Lax"
+        "{}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Lax",
+        cfg().cookie_name
     );
     println!("  RESPONSE: 200 OK");
     println!("            Set-Cookie: {set_cookie}");
@@ -364,7 +365,7 @@ async fn protected(headers: HeaderMap) -> Response {
         .unwrap_or("");
     let authed = cookie
         .split(';')
-        .any(|c| c.trim().starts_with(&format!("{COOKIE_NAME}=")));
+        .any(|c| c.trim().starts_with(&format!("{}=", cfg().cookie_name)));
     flow_header(5, "PROTECTED  (GET /api/protected)");
     println!("  REQUEST : GET /api/protected");
     println!("            Cookie: {cookie:?}");
