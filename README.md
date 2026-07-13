@@ -25,6 +25,23 @@ the stolen session dies within seconds on their machine.
 The whole crypto dance is done by the browser. **The server just:** (1) invites
 registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies on refresh.
 
+> **Common misconception — the bound cookie is NOT encrypted or signed with the private key.**
+> It's a **plain, opaque bearer token** (a random string), sent as an ordinary cookie; requests
+> are **not** individually signed either. The private key's *only* job is to **sign the challenge
+> at refresh** (proof-of-possession) to mint a new cookie. So the security is not "the cookie is
+> cryptographic" — it's **short cookie life × only the device can refresh**:
+>
+> ```
+> Private key → signs the CHALLENGE at refresh   → mints a new short-lived cookie
+> Cookie      → plain token, sent normally        → proves "I hold a currently-valid session"
+> ```
+>
+> A stolen cookie therefore works only until it **expires** (the thief can't refresh it) — DBSC
+> shrinks the theft window from "forever" to one cookie lifetime, rather than making each request
+> cryptographically signed (which would need heavy browser/JS changes). On the server, the cookie
+> value is validated by **comparing it to the stored value** for the session (constant-time), not
+> by decrypting or verifying a signature on it.
+
 ---
 
 ## 2. Endpoints (5)
