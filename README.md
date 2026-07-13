@@ -738,10 +738,13 @@ the browser cached just before the cookie expired is still valid when it's final
 `current_challenge` + `challenge_issued_at`, `created_at`, `expires_at`. Everything else is
 robustness/observability on top.
 
-> Mapping back to this demo: we store only `session_identifier → device_public_key`, mint a fresh
-> cookie value each refresh **without** persisting it, use a monotonic counter instead of random
-> challenges, and never check `jti` — which is why the code says "log & continue" instead of
-> enforcing. §9.2 + this table together are the gap between the demo and a real server.
+> Mapping back to this demo: the `Binding` struct in `src/main.rs` implements a **minimal version
+> of this table** — `user_id`, `device_public_key`, `algorithm`, `cookie_value`, `challenge`,
+> `created_at`, `expires_at`, held in an in-memory `HashMap<session_identifier, Binding>` and
+> printed on every register/refresh (`STORE [created]` / `STORE [updated]`) so you can watch it.
+> What it still omits vs. production: real per-user keying (no login here), `jti`/expiry
+> *enforcement* (we log & continue — §9.2), crypto-random challenges, and the latency-race overlap
+> fields. So §9.2 + the extras above are the remaining gap between the demo and a real server.
 
 ---
 

@@ -30,6 +30,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// Runtime config (env-overridable) so the *same* binary works both locally (mkcert cert on
@@ -50,6 +51,9 @@ fn cfg() -> &'static Config {
 /// to match report-uri/dbsc-php and keep the cookie reliably present when you click a protected
 /// page (a 20s cookie is often expired at click time). Lower it to watch refreshes more often.
 const COOKIE_MAX_AGE_SECS: u64 = 300;
+/// Session (binding) lifetime — how long the server keeps the device binding. Tie this to your
+/// login/session TTL (e.g. a 30-day "remember me"). Independent of the short bound-cookie lifetime.
+const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
 
 /// An EC P-256 public key (base64url X/Y coordinates), as carried in a device JWT's `jwk`.
 #[derive(Clone)]
@@ -58,11 +62,30 @@ struct PubKey {
     y: String,
 }
 
-/// In-memory store: session_identifier -> the device public key bound at registration.
-/// Cleared on restart (so sessions persisted in the browser become "unknown" — see refresh).
+/// What a production DBSC server stores **per session** — a minimal version of
+/// report-uri/dbsc-php's `Binding` (and README §9.5). Its existence in the store *is* the
+/// "this session is device-bound" mark. Keyed by a stable session id.
+///
+/// This demo has no real login, so we key by the DBSC `session_identifier` and use a placeholder
+/// `user_id`. A real server keys by the stable **app session id** and stores the real user.
+#[derive(Clone)]
+struct Binding {
+    user_id: String,           // which account this belongs to (for revoke-all / auditing)
+    device_public_key: PubKey, // THE crux — every refresh proof is verified against this
+    algorithm: String,         // pinned signing alg ("ES256"); reject anything else
+    cookie_value: String,      // current bound-cookie value; compare (constant-time) at the gate
+    challenge: String,         // the nonce the next refresh JWT must carry as `jti` (anti-replay)
+    created_at: u64,           // unix secs — registration time (grace / session age)
+    expires_at: u64,           // unix secs — tie to your login/session lifetime
+}
+
+/// In-memory session store: `session_identifier -> Binding`. A real server uses Redis or a table
+/// keyed by the stable app session id in a **dedicated** key space (never a shared session blob —
+/// see §9.5). Cleared on restart, so browser-persisted sessions become "unknown" on refresh
+/// (→ 404, dropped).
 #[derive(Clone, Default)]
 struct AppState {
-    sessions: Arc<Mutex<HashMap<String, PubKey>>>,
+    sessions: Arc<Mutex<HashMap<String, Binding>>>,
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -110,6 +133,24 @@ fn has_bound_cookie(headers: &HeaderMap) -> bool {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|h| h.split(';'))
         .any(|c| c.trim().starts_with(&name))
+}
+
+/// Current unix time in seconds (for the binding's created_at / expires_at).
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Print the stored session record so you can SEE exactly what a production server keeps per
+/// session (the point of the demo's storage). Called on register (created) and refresh (updated).
+fn print_binding(label: &str, session_id: &str, b: &Binding) {
+    println!("  STORE [{label}]  key(session_identifier)={session_id} -> Binding {{");
+    println!("           user_id          = {}", b.user_id);
+    println!("           device_public_key= <EC P-256 x/y>   (verify every refresh against this)");
+    println!("           algorithm        = {}", b.algorithm);
+    println!("           cookie_value     = {}   (rotates every refresh)", b.cookie_value);
+    println!("           challenge        = {}   (next refresh must present as jti)", b.challenge);
+    println!("           created_at       = {}   expires_at = {}", b.created_at, b.expires_at);
+    println!("         }}");
 }
 
 #[tokio::main]
@@ -248,10 +289,25 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
     // A production server would also check jti == the challenge it issued and
     // authorization == its auth code, and REJECT if !verified. We log & continue.
 
+    // Build the per-session record a production server would persist (see the `Binding` struct
+    // and §9.5). In this demo user_id is a placeholder (no real login); a real app stores the
+    // authenticated user and keys the store by its own session id.
+    let now = now_secs();
     let session_id = nonce("sess");
-    state.sessions.lock().unwrap().insert(session_id.clone(), pubkey);
+    let cookie_value = nonce("cookie");
+    let binding = Binding {
+        user_id: "demo-user".to_string(),
+        device_public_key: pubkey,
+        algorithm: "ES256".to_string(),
+        cookie_value: cookie_value.clone(),
+        challenge: nonce("chal"),
+        created_at: now,
+        expires_at: now + SESSION_TTL_SECS,
+    };
+    print_binding("created", &session_id, &binding);
+    state.sessions.lock().unwrap().insert(session_id.clone(), binding);
 
-    session_response(&session_id)
+    session_response(&session_id, &cookie_value)
 }
 
 /// Step 3: Chrome calls this automatically when the bound cookie needs refreshing.
@@ -269,8 +325,10 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
     // Reject sessions we don't know (e.g. persisted in the browser from a previous run).
     // Without this we'd blindly re-mint forever -> a refresh storm. 404 tells Chrome to
     // drop the stale session.
-    let stored_key = state.sessions.lock().unwrap().get(&session_id).cloned();
-    let Some(stored_key) = stored_key else {
+    // Look up the stored Binding for this session (this is why we persist it — to find the
+    // device key and current state). Unknown -> 404 so Chrome drops a stale persisted session.
+    let binding = state.sessions.lock().unwrap().get(&session_id).cloned();
+    let Some(binding) = binding else {
         flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh)");
         println!("  REQUEST : POST /dbsc/refresh");
         println!("            Cookie: {}", cookie_in(&headers));
@@ -282,8 +340,12 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
 
     let Some(jwt) = jwt_from(&headers, &body) else {
         // No proof yet: demand one with a challenge. Status MUST be 403 (Chrome re-signs
-        // on 403, not 401). Format: "<challenge>";id="<session_id>".
+        // on 403, not 401). Format: "<challenge>";id="<session_id>". Store the issued challenge
+        // in the binding — a production server checks the next refresh's `jti` against it.
         let challenge = nonce("refchal");
+        if let Some(b) = state.sessions.lock().unwrap().get_mut(&session_id) {
+            b.challenge = challenge.clone();
+        }
         let value = format!("\"{challenge}\";id=\"{session_id}\"");
         flow_header(3, "REFRESH — CHALLENGE  (POST /dbsc/refresh, no proof)");
         println!("  REQUEST : POST /dbsc/refresh");
@@ -299,13 +361,13 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
         return (StatusCode::FORBIDDEN, out, "challenge issued").into_response();
     };
 
-    // Proof provided: the refresh JWT has NO embedded key — verify it against the key we
-    // stored at registration. That's the whole point: only this device can re-sign.
+    // Proof provided: the refresh JWT has NO embedded key — verify it against the key stored in
+    // the Binding at registration. That's the whole point: only this device can re-sign.
     flow_header(4, "REFRESH — PROOF  (POST /dbsc/refresh, signed JWT)");
     let (jti, verified) = match decode_jwt(&jwt) {
         Some((jwt_header, claims, signing_input, sig_b64)) => {
             let es256 = jwt_header.get("alg").and_then(|a| a.as_str()) == Some("ES256");
-            let v = es256 && verify_sig(&signing_input, &sig_b64, &stored_key);
+            let v = es256 && verify_sig(&signing_input, &sig_b64, &binding.device_public_key);
             let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?").to_string();
             (jti, v)
         }
@@ -316,13 +378,20 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap, body: String
     println!("            Sec-Secure-Session-Id: {session_id}");
     println!("            Secure-Session-Response (JWT): {jwt}");
     println!("            decoded -> jti={jti}, no jwk, verified vs STORED key={verified}");
-    session_response(&session_id)
+
+    // Rotate the stored cookie value + challenge (both MUST change every refresh).
+    let cookie_value = nonce("cookie");
+    if let Some(b) = state.sessions.lock().unwrap().get_mut(&session_id) {
+        b.cookie_value = cookie_value.clone();
+        b.challenge = nonce("chal");
+        print_binding("updated", &session_id, b);
+    }
+    session_response(&session_id, &cookie_value)
 }
 
-/// Build the DBSC session-config JSON + `Set-Cookie` shared by register/refresh.
-fn session_response(session_id: &str) -> Response {
-    let cookie_value = nonce("cookie");
-
+/// Build the DBSC session-config JSON + `Set-Cookie` shared by register/refresh. The caller mints
+/// and stores `cookie_value` in the `Binding`, then passes it here so the wire value matches state.
+fn session_response(session_id: &str, cookie_value: &str) -> Response {
     let config = json!({
         "session_identifier": session_id,
         "refresh_url": "/dbsc/refresh",
