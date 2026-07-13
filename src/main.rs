@@ -378,10 +378,11 @@ async fn protected(headers: HeaderMap) -> Response {
     Json(json!({ "authenticated": authed, "cookie_header": cookie })).into_response()
 }
 
-/// Same check as `/api/protected`, but reached by a **top-level navigation** (a real `<a href>`),
-/// not `fetch()`. Chrome injects the DBSC-managed cookie into document navigations but NOT into
-/// `fetch()`/XHR requests on this setup — so this page shows `true` where `/api/protected` shows
-/// `false`. (This is what the `dbsc-php` `?route=account` page demonstrates.)
+/// Same check as `/api/protected`, but reached by a **top-level navigation** (a real `<a href>`)
+/// instead of `fetch()`. Both receive the device-bound cookie (Chrome delivers it to app requests
+/// on macOS) — we kept both routes only to show that request type does NOT matter. The reason an
+/// earlier version showed `false` was a bug here: cookies arrive in MULTIPLE `Cookie` headers and
+/// we read only the first with `.get()`; `has_bound_cookie` now reads them all (§5).
 async fn protected_page(headers: HeaderMap) -> Response {
     let _log = LOG_LOCK.lock().unwrap();
     let cookie = cookie_in(&headers);
@@ -501,12 +502,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <li><b>Start session</b> submits a form to <code>/start-form</code>; the browser then
         automatically POSTs <code>/dbsc/register</code> and later <code>/dbsc/refresh</code>.
         Watch the terminal.</li>
-    <li><b>Call protected (fetch)</b> checks the cookie via <code>fetch()</code> — Chrome does
-        <b>not</b> inject the device-bound cookie into <code>fetch()</code>/XHR, so this stays
-        <code>false</code>.</li>
-    <li><b>Open protected page (navigation)</b> is a real link (a top-level navigation) — Chrome
-        <b>does</b> inject the bound cookie here, so this shows <code>true</code>. That fetch-vs-
-        navigation difference is the whole point (see README §5).</li>
+    <li><b>Call protected (fetch)</b> and <b>Open protected page (navigation)</b> both check
+        whether the device-bound cookie rode the request. Both show <code>authenticated=true</code>
+        once a session is registered — the bound cookie is delivered to app requests (see §5).</li>
   </ol>
   <p>
     <!-- This is a real form-POST navigation (so the page reloads) ON PURPOSE. The

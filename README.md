@@ -95,7 +95,7 @@ sequenceDiagram
     rect rgb(255, 245, 245)
     Note over W,S: App request
     W->>S: GET /api/protected (user clicks Call protected)
-    S-->>W: authenticated true / false<br/>(false on this macOS + localhost setup, see §5)
+    S-->>W: authenticated true  (bound cookie delivered; false only if no active session)
     end
 ```
 
@@ -119,7 +119,7 @@ Server verifies vs STORED key,  → 200 session config + fresh Set-Cookie
 
 ── App request ──────────────────────────────────────────────────────
 You     → GET /api/protected
-Server  → authenticated true / false   (false on macOS + localhost — see §5)
+Server  → authenticated true   (bound cookie rode the request; false only if no active session)
 ```
 
 **What's inside the proof JWT** (a compact JWS — `header.payload.signature`):
@@ -413,23 +413,35 @@ old persisted DBSC sessions before a fresh run.
 
 ## 5. What works vs. what doesn't
 
-### Findings summary (all tested on a real HTTPS domain, macOS Chrome)
+> **TL;DR — it all works, including on macOS.** The long "doesn't work on macOS" investigation in
+> this section's history turned out to be a **bug in this demo's cookie parsing**, not a DBSC or
+> platform limitation. Once fixed, the device-bound cookie reaches app requests (both `fetch()`
+> and navigations) and `/api/protected` returns `authenticated=true`.
+
+### Findings summary (macOS Chrome, over a real HTTPS domain)
 
 | Result | Status |
 |--------|--------|
 | DBSC handshake — register + refresh, ES256 verified vs. stored key | ✅ works |
-| `Set-Cookie` on a **normal** response (correlation cookie) reaches `/api/protected` | ✅ works |
-| Bound cookie reaches `/api/protected` (`authenticated=true`) | ❌ **fails on macOS** |
+| Bound cookie reaches `/api/protected` (**`fetch()`**) → `authenticated=true` | ✅ works |
+| Bound cookie reaches `/protected-page` (**navigation**) → `authenticated=true` | ✅ works |
+| Stale-session handling — unknown session ids get `404` | ✅ works |
 
-**Ruled out as the cause** (each retested, still `false`): cookie **name** · **`__Host-` prefix** ·
-`SameSite` **Lax/Strict** · **`Domain=`** vs host-only · **lifetime** (`Max-Age` 20/120/3600) ·
-**`fetch()`** vs navigation · **multi- vs single-session** · **`localhost`** vs real domain ·
-**`Set-Cookie` itself** (a plain control cookie behaves the same).
+### The bug that made it look broken (and the fix)
+`/api/protected` reported `authenticated=false` for a long time even though DevTools clearly showed
+the bound cookie on the request. Cause: **Chrome sends cookies across more than one `Cookie:`
+request header** — ordinary cookies in one, the **DBSC-managed cookie in a separate header** — and
+the server read only the **first** via `headers.get(COOKIE)`. The bound cookie sat in the *second*
+header, so it was never seen. Fix: read **all** headers with `headers.get_all(COOKIE)` (see
+`has_bound_cookie` / `cookie_in` in `src/main.rs`). Post-fix, the logs show it plainly:
 
-**Root cause:** cookies set on the `/dbsc/register` & `/dbsc/refresh` responses don't populate the
-page's cookie jar; the only path for the bound cookie to reach app requests is Chrome's **DBSC
-managed-cookie injection**, which doesn't complete on the **macOS software-keys / manual-testing**
-path. Client-side, macOS-specific. Expected to work on **Windows Chrome** (DBSC GA + real TPM).
+```
+FLOW 6: PROTECTED PAGE
+  raw Cookie header count = 2
+  Cookie[0]: dbsc-registration-sessions-id=regid2
+  Cookie[1]: __Host-auth_cookie=cookie4      ← the bound cookie, in a SECOND Cookie header
+  authenticated=true
+```
 
 ### ✅ Works (verified in the server logs)
 - **Registration** — Chrome generates a device key, signs a JWT (`typ: dbsc+jwt`), and the
@@ -440,62 +452,25 @@ path. Client-side, macOS-specific. Expected to work on **Windows Chrome** (DBSC 
 - **Stale-session handling** — unknown session ids get `404`, so old persisted sessions
   are dropped instead of causing a refresh storm.
 
-### ❌ Doesn't work on this setup
-- **`/api/protected` shows `authenticated=false`.** The device-bound `auth_cookie` **is**
-  delivered to Chrome's own `/dbsc/refresh` requests (`Cookie: auth_cookie=…` shows up on many of
-  them in the logs) but is **never** injected into our page's `/api/protected` request — which
-  only ever carries the plain `dbsc-registration-sessions-id` cookie. So the app request can't
-  see the bound cookie → `authenticated=false`.
-  **Expiry is ruled out:** we retested with `Max-Age=120` (a 2-minute cookie) clicked
-  immediately — still `false`, so it isn't a timing/expiry race. Ordinary cookies also work fine
-  on this origin (the correlation cookie rides *every* request). So the blocker is specifically
-  Chrome **injecting the DBSC-managed cookie into normal app requests** — the "last mile" that
-  doesn't complete on the macOS software-keys/localhost testing path. *(Honest trail: this note
-  was corrected twice as more logging arrived — first we thought the bound cookie reached no
-  request at all; a fuller multi-refresh trace showed it DOES reach `/dbsc/refresh`, just not the
-  app request.)*
+### Every "ruled out" was a false negative from that one bug
+While the parser read only the first header, we chased a long list of red herrings — each now
+known to be irrelevant, because the fix made every one of them deliver `true`: `fetch()` vs.
+navigation · `SameSite` Lax/Strict · `Domain=` vs. host-only · the `__Host-` prefix · cookie
+**name** · **lifetime** (`Max-Age` 20/120/300) · `scope_specification` present/absent · **`localhost`
+vs. a real domain** · the **Secure Web Apps `.fbinfra.net` tunnel**. None of them mattered.
 
-  **`localhost` is also ruled out (tested).** We deployed this exact server behind a **real,
-  browser-trusted HTTPS domain** (valid cert, see §10), DBSC handshake verifying end-to-end. On
-  **macOS Chrome it was still `authenticated=false`** — the bound cookie still isn't injected into
-  app requests. So a real domain vs. `localhost` makes **no difference on macOS**; the blocker is
-  the **client-side macOS path**, not the origin.
+Two sub-mysteries the same bug explains:
+- **`report-uri/dbsc-php`'s `/account` "worked" while our demo didn't** — PHP's `$_COOKIE` already
+  merges all `Cookie` headers, so it never hit this; our Rust `.get()` read only the first.
+- **The bound cookie "sometimes" appeared on `/dbsc/refresh`** — the **order of the two `Cookie`
+  headers varied**, so `.get()` occasionally happened to return the bound one, which sent us down
+  several wrong paths.
 
-  **`Set-Cookie` itself works — proven with a control cookie.** To rule out "`Set-Cookie` is
-  broken," we set a **second, ordinary cookie** (`probe_plain`, `Max-Age=3600`, *not* in
-  `credentials`) on the **same** `/dbsc/register` + `/dbsc/refresh` responses. Result on
-  `/api/protected`: the correlation cookie (set on the **normal** `/start-form` response) is
-  delivered ✅, but **neither** the managed bound cookie **nor** `probe_plain` (both set on the
-  **DBSC-engine** responses) is delivered ❌. Two takeaways: (1) `Set-Cookie` on a normal response
-  is fine; (2) cookies set on the register/refresh responses **don't populate the page's normal
-  cookie jar at all** — those are the DBSC engine's own requests. So the **only** intended way for
-  a register/refresh cookie to reach app requests is Chrome's **managed-cookie injection**, which
-  is exactly the step that doesn't complete on the macOS software-keys path. *(Verified with a
-  temporary `probe_plain` control cookie set on those responses, since removed.)*
-
-  **Ruled out (things we tried that made no difference):** `fetch()` vs. top-level
-  navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; the cookie **name**
-  (`DBSC_COOKIE_NAME`); the strict **`__Host-` prefix**
-  ([RFC 6265bis §4.1.3.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-05#section-4.1.3.2)) —
-  **retested on the real domain, single session, still `false`**; **cookie lifetime**
-  (`Max-Age=20` vs `120` — expiry is not the cause); and **`localhost` vs. a real HTTPS domain**
-  (still `false` on macOS). Every one → still `false`, including a clean single-session
-  run — strong evidence the blocker is **not** a cookie-attribute or origin problem but the
-  client testing path below.
-
-### Why (best current understanding)
-DBSC's *public* rollout is Windows-first; **macOS is still "manual testing"**, which
-requires the **software-keys / UnexportableKeyService** path. That path is explicitly
-"not secure" and exists to exercise the **protocol** (register/refresh), not full
-production cookie-binding. On it, the last mile — attaching the bound cookie to the
-application's own requests — doesn't complete on `localhost`. Notably, the official
-reference server (`drubery/dbsc-test-server`) has **no protected endpoint at all** — these
-localhost demos demonstrate the *handshake*, not app-request cookie delivery. So the
-`authenticated=true` green light is a demo convenience this testing configuration won't
-light up; the DBSC protocol itself is nonetheless demonstrably working.
-
-Likely ways to get delivery working (untested here): run on a **real HTTPS domain with a
-production/CT cert** and hardware keys, or on **Windows** where DBSC is generally available.
+### Lesson
+On the wire (especially HTTP/2, which Chrome uses over TLS) a single request can carry **multiple
+`Cookie` headers**, and DBSC puts its managed cookie in its own. **Always read them all**
+(`get_all`), never just the first. That was the entire bug — DBSC worked on macOS the whole time,
+over both `localhost` and the internal tunnel, for both `fetch()` and navigations.
 
 ---
 
@@ -561,7 +536,7 @@ which Chrome silently ignores. The docs never said that.)
 | 5 | Describes an optional **long-lived fallback cookie** for when refresh fails. | Not implemented. | Out of scope for a minimal demo. |
 | 6 | Barely specifies the **JWT** ("a public key in a JWT"). | We parse it fully: read the EC `jwk` from the JWT header at registration, verify ES256; on refresh verify against the **stored** key. | The docs punt JWT details to the spec; we implemented them so the proof is actually checked. |
 | 7 | Doesn't discuss server session lifecycle. | We **reject unknown sessions with `404`**. | Our session store is in-memory and resets on restart, but the browser persists sessions — without the `404` those stale sessions refresh forever (a storm). |
-| 8 | Implies the bound cookie is delivered to your app's requests. | On this setup it is **not** (see §5). | The macOS software-keys/localhost testing path exercises the handshake but doesn't complete production cookie-binding to app requests. |
+| 8 | Implies the bound cookie is delivered to your app's requests. | Same — it **is** delivered (`authenticated=true`), once the server reads **all** `Cookie` headers. | Chrome splits cookies across multiple `Cookie` headers (the bound cookie in its own); reading only the first made it *look* undelivered — a demo bug, not a DBSC limitation (see §5). |
 
 ### vs. the official reference server ([drubery/dbsc-test-server](https://github.com/drubery/dbsc-test-server))
 
@@ -578,7 +553,7 @@ way." Where we differ, it's because **we simplified** or because we run on **loc
 | JWT claim checks | Verifies signature **and** that `jti` == the issued challenge and `authorization` == the auth code. | We verify the **signature only** (log the claims). | Simpler to read; the signature is the core proof-of-possession. |
 | Enablement | Ships an **Origin-Trial token** (`origin-trial` header) valid for its real `deno.dev` domain. | Uses **Chrome testing flags** on `localhost`. | `localhost` can't carry a domain-bound OT token, so we take the flags door instead. |
 | Scope / cookie config | A form lets you set scope include/exclude paths, cookie name/value/lifetime at runtime. | **Hardcoded** (whole-origin scope, `auth_cookie`, 20s). | A hello-world doesn't need the knobs. |
-| Protected endpoint | **None** — it only shows a session table. | We added **`/api/protected`** to test cookie delivery. | To make "is the bound cookie delivered?" observable (which surfaced the §5 limitation). |
+| Protected endpoint | **None** — it only shows a session table. | We added **`/api/protected`** to test cookie delivery. | To make "is the bound cookie delivered?" observable (which surfaced our multi-`Cookie`-header parsing bug — §5). |
 | Language / stack | TypeScript on Deno; `fast-jwt` + `jwkToPem`. | Rust on axum; `p256` for ES256. | Personal preference / learning in Rust. |
 
 **Bottom line:** the reference is the more complete, production-shaped implementation; ours
@@ -610,7 +585,7 @@ the challenge · offering only `(ES256)` in the registration header (not the Chr
 | Registration header | `(ES256); path="/dbsc/register"; challenge="…"` — **no** `authorization`. | Same, but we add `authorization="auth-code-123"`. | Both are spec-legal; we include it to show where an auth code would ride. |
 | Bound cookie | `__Host-dbsc` (default), `Max-Age=300`, `SameSite=Lax`. | `auth_cookie`, `Max-Age=20`, `SameSite=Lax`. | 20s makes the auto-refresh observable in seconds. We tried the `__Host-` prefix (see §5) — it made no difference to delivery here, so we kept a plain host-only name. |
 | `scope` JSON | `origin` + `include_site:false`, **no `scope_specification`** (a `__Host-` cookie can't span subdomains anyway). | `origin` + `include_site:false` + an explicit `scope_specification` **include** rule. | Both work; we keep the explicit rule to make the scope visible. |
-| Enforcement | Full gate **primitives**: `getBinding`, constant-time `boundCookieMatches` (with a single-depth previous-value overlap for refresh races), document-vs-subresource, a registration grace window. The caller wires the policy. | None — just `/api/protected` reporting whether the cookie rode along. | We only *probe* delivery (which surfaced the §5 limitation); we don't gate. |
+| Enforcement | Full gate **primitives**: `getBinding`, constant-time `boundCookieMatches` (with a single-depth previous-value overlap for refresh races), document-vs-subresource, a registration grace window. The caller wires the policy. | None — just `/api/protected` reporting whether the cookie rode along. | We only *probe* delivery (which surfaced our cookie-parsing bug — §5); we don't gate. |
 | Refresh robustness | Single-depth **challenge + cookie overlap** windows for latency races; an optional single-phase **first** refresh via `advertiseRefreshChallenge`. | Straight `403`→proof→`200`, fresh cookie each time, no overlap. | Those windows matter under real network latency, not on loopback. |
 | Revoke / logout | `revoke()` deletes state + emits a cookie deletion (distinct enforcement-terminated vs logout audit events). | Not implemented. | Out of scope for the demo. |
 | Audit + tests | `AuditLoggerInterface` events; a self-contained attack-case harness (wrong device key, wrong / expired challenge, stale cookie, `alg=none`). | `println!` to stdout; no tests. | The whole point here is *visibility in the terminal*, not coverage. |
@@ -693,11 +668,13 @@ must:
 - **Latency-race overlap windows** (accept the single previous cookie value / challenge during
   the refresh round-trip) so normal requests racing a refresh don't get spuriously logged out.
 
-### 9.4 Get real cookie delivery working
+### 9.4 Cookie delivery — confirmed working (read ALL Cookie headers)
 
-The unresolved §5 limitation (bound cookie not delivered to app requests) is tied to the macOS
-software-keys/localhost testing path. Retest on a **real HTTPS domain with hardware keys**, or
-on **Windows** where DBSC is generally available, before trusting `/api/protected`.
+An earlier version of this doc listed a "bound cookie not delivered to app requests" limitation.
+That was a **demo bug** — reading only the first of Chrome's multiple `Cookie` headers — now fixed
+(§5). The device-bound cookie **is** delivered to app requests on macOS. The only production
+takeaway: make sure your server reads **all** `Cookie` headers (`get_all`), since the bound cookie
+arrives in its own.
 
 ### 9.5 What to store server-side (per user / per session)
 
@@ -788,9 +765,8 @@ cert, a reverse proxy that forwards to this server, a dev tunnel that terminates
 domain, etc. The requirement is a **real domain with a valid cert** (not `localhost`, not an IP) so
 Chrome treats it as a proper secure context.
 
-### The decisive variable is still the client
-A real HTTPS origin removes the `localhost` variable — but the blocker is most likely the
-**macOS software-keys / manual-testing path**, which is client-side. Tested on a real HTTPS domain,
-**macOS Chrome still showed `authenticated=false`** (see §5). Seeing `authenticated=true` most
-likely needs **Windows Chrome** (DBSC is generally available there, Chrome 146+) pointed at the
-same URL. Testing from **both** macOS and Windows against one URL pinpoints which variable mattered.
+### It works on macOS
+Cookie delivery was **confirmed on macOS Chrome** over a real internal HTTPS domain —
+`/api/protected` returns `authenticated=true` (see §5). No Windows needed. (Earlier notes here
+claimed macOS "still showed `authenticated=false`"; that was the multi-`Cookie`-header parsing bug,
+since fixed.)
