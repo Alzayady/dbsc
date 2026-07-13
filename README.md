@@ -740,21 +740,32 @@ it already trusts — **on both macOS and Windows, VPN-less**.
 
 The server is env-configurable (defaults = the local mkcert setup), so no code fork is needed.
 
-**On a devserver:**
-```bash
-# 1. Get the code onto the devserver (rsync from your laptop, or clone your repo), then:
-cd dbsc_hello
-# (install Rust if needed: feature install rust  — or rustup)
+**Get a devserver** (persistent is right for a long-running server; OnDemand is fiddlier — no
+`sudo`, 18h lifetime): reserve one at bunnylol **`devservers`** (`fburl.com/dev`) → *Reserve a
+Server* → default size → nearest DC → **Duration: permanent** → purpose → *Reserve* (~10 min).
+Copy its hostname (`devvmXXXX.<region>.facebook.com`) and connect: `x2ssh -et <host>` (VPN-less)
+or `ssh <host>` (on VPN). First time: run `fixmyserver` on the box.
 
-# 2. Point the app at the host cert + a 442xx HTTPS port, bound on IPv6.
+**Copy the code up** (from your laptop):
+```bash
+DEV=devvmXXXX.<region>.facebook.com
+rsync -az --delete --exclude target --exclude .git --exclude 'localhost+2*.pem' \
+  ./ "$DEV:~/dbsc_hello/"
+```
+
+**On the devserver:**
+```bash
+cd ~/dbsc_hello
+feature install ttls_fwdproxy       # so cargo can fetch crates via fwdproxy (else the build hangs)
+command -v cargo || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Point the app at the host cert + a 442xx HTTPS port, bound on IPv6.
 H=$(hostname)                       # e.g. devvm1234.abc0.facebook.com
 export DBSC_BIND="[::]:44200"       # 442xx = HTTPS range; bind [::] (IPv6!), not 127.0.0.1
 export DBSC_TLS_CERT="/etc/pki/tls/certs/${H}.crt"
 export DBSC_TLS_KEY="/etc/pki/tls/certs/${H}.key"
 export DBSC_ORIGIN="https://${H%%.*}.fbinfra.net:44200"   # note: .fbinfra.net, NOT .facebook.com
 export DBSC_HOST="${H%%.*}.fbinfra.net"
-
-# 3. Run it.
 cargo run
 ```
 
