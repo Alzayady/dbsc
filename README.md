@@ -413,6 +413,24 @@ old persisted DBSC sessions before a fresh run.
 
 ## 5. What works vs. what doesn't
 
+### Findings summary (all tested on a real internal HTTPS domain, macOS Chrome)
+
+| Result | Status |
+|--------|--------|
+| DBSC handshake — register + refresh, ES256 verified vs. stored key | ✅ works |
+| `Set-Cookie` on a **normal** response (correlation cookie) reaches `/api/protected` | ✅ works |
+| Bound cookie reaches `/api/protected` (`authenticated=true`) | ❌ **fails on macOS** |
+
+**Ruled out as the cause** (each retested, still `false`): cookie **name** · **`__Host-` prefix** ·
+`SameSite` **Lax/Strict** · **`Domain=`** vs host-only · **lifetime** (`Max-Age` 20/120/3600) ·
+**`fetch()`** vs navigation · **multi- vs single-session** · **`localhost`** vs real domain ·
+**`Set-Cookie` itself** (a plain control cookie behaves the same).
+
+**Root cause:** cookies set on the `/dbsc/register` & `/dbsc/refresh` responses don't populate the
+page's cookie jar; the only path for the bound cookie to reach app requests is Chrome's **DBSC
+managed-cookie injection**, which doesn't complete on the **macOS software-keys / manual-testing**
+path. Client-side, macOS-specific. Expected to work on **Windows Chrome** (DBSC GA + real TPM).
+
 ### ✅ Works (verified in the server logs)
 - **Registration** — Chrome generates a device key, signs a JWT (`typ: dbsc+jwt`), and the
   server **verifies the ES256 signature** (`verified: true`), then issues the bound cookie.
@@ -453,9 +471,8 @@ old persisted DBSC sessions before a fresh run.
   is fine; (2) cookies set on the register/refresh responses **don't populate the page's normal
   cookie jar at all** — those are the DBSC engine's own requests. So the **only** intended way for
   a register/refresh cookie to reach app requests is Chrome's **managed-cookie injection**, which
-  is exactly the step that doesn't complete on the macOS software-keys path. (The `probe_plain`
-  control cookie is still emitted by the server — see `session_response` — so you can reproduce
-  this side-by-side.)
+  is exactly the step that doesn't complete on the macOS software-keys path. *(Verified with a
+  temporary `probe_plain` control cookie set on those responses, since removed.)*
 
   **Ruled out (things we tried that made no difference):** `fetch()` vs. top-level
   navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; the cookie **name**

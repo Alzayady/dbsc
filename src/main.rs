@@ -344,19 +344,8 @@ fn session_response(session_id: &str) -> Response {
         "{}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Lax",
         cfg().cookie_name
     );
-    // DIAGNOSTIC control cookie: identical attributes, set in the SAME response, but its name is
-    // NOT in the `credentials` list — so Chrome treats it as an ORDINARY cookie, not DBSC-managed.
-    // It should ride /api/protected like any normal cookie, while the managed bound cookie above
-    // does not (on the macOS software-keys path). That side-by-side proves the failure is DBSC's
-    // managed-cookie injection, not `Set-Cookie` itself (§5).
-    // Long-lived (3600s) on purpose: rules out expiry as the reason it might not reach
-    // /api/protected — so if it's still absent, cookies set on DBSC-engine (register/refresh)
-    // responses simply don't populate the normal cookie jar.
-    let probe_cookie =
-        format!("probe_plain={cookie_value}; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax");
     println!("  RESPONSE: 200 OK");
-    println!("            Set-Cookie: {set_cookie}   (DBSC-managed — in credentials)");
-    println!("            Set-Cookie: {probe_cookie}   (plain control — NOT in credentials)");
+    println!("            Set-Cookie: {set_cookie}");
     println!(
         "            body (session config): {}",
         serde_json::to_string(&config).unwrap_or_default()
@@ -364,7 +353,6 @@ fn session_response(session_id: &str) -> Response {
 
     let mut out = HeaderMap::new();
     out.insert(header::SET_COOKIE, HeaderValue::from_str(&set_cookie).unwrap());
-    out.append(header::SET_COOKIE, HeaderValue::from_str(&probe_cookie).unwrap());
     (StatusCode::OK, out, Json(config)).into_response()
 }
 

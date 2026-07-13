@@ -34,7 +34,7 @@ export DBSC_TLS_CERT="/etc/pki/tls/certs/${H}.crt"
 export DBSC_TLS_KEY="/etc/pki/tls/certs/${H}.key"
 export DBSC_ORIGIN="https://${FBINFRA}:44200"
 export DBSC_HOST="${FBINFRA}"
-export DBSC_COOKIE_NAME="testing_cook_abc"   # arbitrary name (docs: name it whatever, must match credentials); change to test other names
+export DBSC_COOKIE_NAME="__Host-auth_cookie"   # production-correct (Secure+Path=/+no Domain all satisfied); change to test other names
 
 echo ">> DBSC_ORIGIN = $DBSC_ORIGIN"
 echo ">> Open that URL in Chrome (macOS first, then Windows). Ctrl-C to stop."
