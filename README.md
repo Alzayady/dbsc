@@ -445,12 +445,14 @@ old persisted DBSC sessions before a fresh run.
   **client-side macOS path**, not the origin.
 
   **Ruled out (things we tried that made no difference):** `fetch()` vs. top-level
-  navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; the strict
-  **`__Host-` prefix** (`Secure` + `HttpOnly`, no `Domain`, per
-  [RFC 6265bis §4.1.3.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-05#section-4.1.3.2));
-  **cookie lifetime** (`Max-Age=20` vs `120` — expiry is not the cause); and **`localhost` vs. a
-  real internal HTTPS domain** (still `false` on macOS). None changed delivery — strong evidence
-  the blocker is **not** a cookie-attribute or origin problem but the client testing path below.
+  navigation; `SameSite=Lax` vs. `Strict`; `Domain=localhost` vs. host-only; the cookie **name**
+  (`DBSC_COOKIE_NAME`); the strict **`__Host-` prefix**
+  ([RFC 6265bis §4.1.3.2](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-05#section-4.1.3.2)) —
+  **retested on the real domain, single session, still `false`**; **cookie lifetime**
+  (`Max-Age=20` vs `120` — expiry is not the cause); and **`localhost` vs. a real internal HTTPS
+  domain** (still `false` on macOS). Every one → still `false`, including a clean single-session
+  run — strong evidence the blocker is **not** a cookie-attribute or origin problem but the
+  client testing path below.
 
 ### Why (best current understanding)
 DBSC's *public* rollout is Windows-first; **macOS is still "manual testing"**, which
