@@ -233,6 +233,10 @@ async fn main() {
     let addr: std::net::SocketAddr = cfg().bind.parse().expect("invalid DBSC_BIND (e.g. [::]:8443)");
     println!("\n=== DBSC hello-world (HTTPS) ===");
     println!("Open  {}  in Chrome (with the DBSC flags from README enabled).", cfg().origin);
+    println!(
+        "Bound-cookie Max-Age = {}s  (set DBSC_COOKIE_MAX_AGE to change; e.g. 20 to force refreshes).",
+        cfg().cookie_max_age
+    );
     println!("Keep DevTools -> Network open to watch the Secure-Session-* handshake.\n");
     axum_server::bind_rustls(addr, config)
         .serve(app.into_make_service())
