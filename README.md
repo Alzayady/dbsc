@@ -44,7 +44,7 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 
 ---
 
-## 2. Endpoints (5)
+## 2. Endpoints (6)
 
 | Method & path         | Who calls it            | What it does |
 |-----------------------|-------------------------|--------------|
@@ -53,6 +53,7 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 | `POST /dbsc/register` | **Browser (automatic)** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT **header** embeds the device **public key** as a `jwk`; the **claims** echo our challenge back as the `jti`. We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
 | `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key; new challenge as `jti`, **no `jwk`**) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
 | `GET  /api/protected` | Web client (Call protected button) | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
+| `GET  /logout`        | Web client (Logout button) | **Revoke**: deletes the server-side `Binding`, expires the bound cookie, and sends `Clear-Site-Data` to end the DBSC session. A future refresh then gets `404`. |
 
 Header names are `Secure-Session-*`; Chrome's docs get these right — it's older blog posts
 / search results that still show the obsolete `Sec-Session-*` (don't copy those). Session
@@ -601,7 +602,7 @@ the real thing → read `dbsc-php`; learning the handshake → read this.
 
 ## 8. Files & references
 
-- `src/main.rs` — the whole server (~5 handlers + JWT/ES256 verification), heavily commented.
+- `src/main.rs` — the whole server (6 handlers + JWT/ES256 verification + `Binding` store), heavily commented.
 - `localhost+2*.pem` — mkcert TLS cert/key (git-ignored via the parent repo).
 - Reference servers to diff against: <https://github.com/drubery/dbsc-test-server> (Chrome
   team's Deno test server) and <https://github.com/report-uri/dbsc-php> (production PHP lib

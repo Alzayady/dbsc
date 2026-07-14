@@ -126,13 +126,18 @@ fn cookie_in(headers: &HeaderMap) -> String {
 
 /// True if any incoming `Cookie` header carries the device-bound cookie (across ALL headers).
 fn has_bound_cookie(headers: &HeaderMap) -> bool {
-    let name = format!("{}=", cfg().cookie_name);
+    bound_cookie_value(headers).is_some()
+}
+
+/// The VALUE of the device-bound cookie on this request (across all `Cookie` headers), if present.
+fn bound_cookie_value(headers: &HeaderMap) -> Option<String> {
+    let prefix = format!("{}=", cfg().cookie_name);
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|h| h.split(';'))
-        .any(|c| c.trim().starts_with(&name))
+        .find_map(|c| c.trim().strip_prefix(&prefix).map(str::to_string))
 }
 
 /// Current unix time in seconds (for the binding's created_at / expires_at).
@@ -174,6 +179,7 @@ async fn main() {
         .route("/dbsc/register", post(register))
         .route("/dbsc/refresh", post(refresh))
         .route("/api/protected", get(protected))
+        .route("/logout", get(logout))
         .with_state(state);
 
     // rustls 0.23 needs a process-wide crypto provider chosen explicitly.
@@ -445,6 +451,51 @@ async fn protected(headers: HeaderMap) -> Response {
     Json(json!({ "authenticated": authed, "cookie_header": cookie })).into_response()
 }
 
+/// Revoke (logout): end the device-bound session. Deletes the server-side `Binding` (so any
+/// future `/dbsc/refresh` gets 404 and Chrome drops the session), deletes the bound cookie, and
+/// sends `Clear-Site-Data` to tell Chrome to clear cookies + end the DBSC session for the origin.
+///
+/// A production server revokes the ONE session keyed by the login id. This demo has no login, so
+/// it finds the binding by the presented bound-cookie value (what a normal app request carries).
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let _log = LOG_LOCK.lock().unwrap();
+    flow_header(7, "LOGOUT / REVOKE  (GET /logout)");
+
+    let presented = bound_cookie_value(&headers);
+    let mut revoked = None;
+    {
+        let mut store = state.sessions.lock().unwrap();
+        let sid = presented
+            .as_ref()
+            .and_then(|val| store.iter().find(|(_, b)| &b.cookie_value == val).map(|(k, _)| k.clone()));
+        if let Some(sid) = sid {
+            store.remove(&sid);
+            revoked = Some(sid);
+        }
+    }
+    match &revoked {
+        Some(sid) => println!("  REVOKE  : deleted Binding for session_identifier={sid}"),
+        None => println!("  REVOKE  : no matching session to delete (no/unknown bound cookie)"),
+    }
+
+    // Tell the browser to drop the bound cookie and end the DBSC session for this origin.
+    let del = format!("{}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax", cfg().cookie_name);
+    println!("  RESPONSE: 200 OK");
+    println!("            Set-Cookie: {del}   (expires the bound cookie)");
+    println!("            Clear-Site-Data: \"cookies\"   (ends the DBSC session)");
+    let mut out = HeaderMap::new();
+    out.insert(header::SET_COOKIE, HeaderValue::from_str(&del).unwrap());
+    out.insert(
+        HeaderName::from_static("clear-site-data"),
+        HeaderValue::from_static("\"cookies\""),
+    );
+    let html = "<!doctype html><meta charset=\"utf-8\"><title>Logged out</title>\
+        <body style=\"font:15px/1.5 system-ui;max-width:720px;margin:40px auto;padding:0 16px\">\
+        <h1>Logged out</h1><p>DBSC session revoked (server binding deleted, bound cookie cleared).\
+        </p><p><a href=\"/\">&larr; back</a></p></body>";
+    (StatusCode::OK, out, Html(html)).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // JWT helpers (compact JWS parse + ES256 verification)
 // ---------------------------------------------------------------------------
@@ -545,6 +596,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <button type="submit">Start session</button>
     </form>
     <button onclick="callProtected()">Call protected</button>
+    <a href="/logout"><button type="button">Logout (revoke)</button></a>
   </p>
   <pre id="log">(server log is in your terminal; browser log here)</pre>
 <script>
