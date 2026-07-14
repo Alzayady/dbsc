@@ -6,7 +6,7 @@
 //!
 //! Endpoints (see README for the flow):
 //!   GET  /               – the demo page (Start session / Call protected buttons)
-//!   POST /start-form     – 303 redirect carrying `Secure-Session-Registration` (starts DBSC)
+//!   POST /start-form     – 200 carrying `Secure-Session-Registration` (starts DBSC)
 //!   POST /dbsc/register  – Chrome POSTs its signed proof JWT here; we verify + open a session
 //!   POST /dbsc/refresh   – Chrome re-proves possession here (challenge → signed retry → re-mint)
 //!   GET  /api/protected  – reports whether the device-bound cookie rode along
@@ -212,8 +212,8 @@ async fn main() {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// Serve the page. The registration invite is NOT emitted here — Chrome ignores it on
-/// a plain GET navigation; it must ride on the form-POST 303 (see `start_form`).
+/// Serve the page. The registration invite is NOT emitted here — it rides the response to the
+/// explicit "Start session" navigation (`start_form`), the way a real app emits it on login.
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
@@ -236,9 +236,11 @@ fn registration_header() -> (HeaderName, HeaderValue) {
     )
 }
 
-/// Step 1: the page's HTML <form> POSTs here. We reply with a 303 redirect back to `/`
-/// carrying `Secure-Session-Registration` plus a cookie that stands in for the login. This
-/// specific response shape (form POST → 303) is what Chrome acts on to start registration.
+/// Step 1: the page's HTML <form> POSTs here. We reply with a **200** carrying
+/// `Secure-Session-Registration` plus a cookie that stands in for the login — matching the Chrome
+/// docs' login response and `report-uri/dbsc-php` (which also emit the header on a plain 200). The
+/// header just has to ride the response to a top-level navigation (not a `fetch()`); 200 or a
+/// 303 redirect both work.
 async fn start_form() -> Response {
     let _log = LOG_LOCK.lock().unwrap();
     let (reg_name, reg_value) = registration_header();
@@ -252,16 +254,19 @@ async fn start_form() -> Response {
 
     flow_header(1, "TRIGGER  (POST /start-form)");
     println!("  REQUEST : POST /start-form   (HTML form submit; no body)");
-    println!("  RESPONSE: 303 See Other");
-    println!("            Location: /");
+    println!("  RESPONSE: 200 OK");
     println!("            Secure-Session-Registration: {}", reg_value.to_str().unwrap_or("?"));
     println!("            Set-Cookie: {set_cookie}");
 
     let mut headers = HeaderMap::new();
     headers.insert(reg_name, reg_value);
-    headers.insert(header::LOCATION, HeaderValue::from_static("/"));
     headers.insert(header::SET_COOKIE, HeaderValue::from_str(&set_cookie).unwrap());
-    (StatusCode::SEE_OTHER, headers, "").into_response()
+    let html = "<!doctype html><meta charset=\"utf-8\"><title>Session started</title>\
+        <body style=\"font:15px/1.5 system-ui;max-width:720px;margin:40px auto;padding:0 16px\">\
+        <h1>Session started</h1>\
+        <p>Registration offered — Chrome now POSTs <code>/dbsc/register</code> automatically. \
+        Watch the terminal.</p><p><a href=\"/\">&larr; back</a></p></body>";
+    (StatusCode::OK, headers, Html(html)).into_response()
 }
 
 /// Step 2: Chrome POSTs its signed proof here. The JWT embeds the device PUBLIC key in
@@ -593,10 +598,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <code>authenticated=true</code> once a session is registered.</li>
   </ol>
   <p>
-    <!-- This is a real form-POST navigation (so the page reloads) ON PURPOSE. The
-         Secure-Session-Registration header must ride the response to a POST navigation;
-         Chrome silently IGNORES it on a fetch()/XHR response, so don't "fix" the reload by
-         switching to fetch(). In a real app this is just your normal login POST → redirect. -->
+    <!-- This is a real form-POST navigation (the page then shows /start-form's 200) ON PURPOSE.
+         The Secure-Session-Registration header must ride the response to a top-level NAVIGATION;
+         Chrome silently IGNORES it on a fetch()/XHR response, so don't switch this to fetch().
+         In a real app this is just your normal login response (a 200, like the Chrome docs). -->
     <form method="POST" action="/start-form" style="display:inline">
       <button type="submit">Start session</button>
     </form>

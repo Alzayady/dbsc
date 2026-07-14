@@ -49,7 +49,7 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 | Method & path         | Who calls it            | What it does |
 |-----------------------|-------------------------|--------------|
 | `GET  /`              | Web client (you)        | Serves the demo page. |
-| `POST /start-form`    | Web client (Start session button) | Replies **303 → `/`** with a `Secure-Session-Registration` header + a `login_auth_id` cookie (a stand-in for your login session — §3). This response is what makes the browser start DBSC. |
+| `POST /start-form`    | Web client (Start session button) | Replies **200** with a `Secure-Session-Registration` header + a `login_auth_id` cookie (a stand-in for your login session — §3). This 200 response (like a real login) is what makes the browser start DBSC. |
 | `POST /dbsc/register` | **Browser (automatic)** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT **header** embeds the device **public key** as a `jwk`; the **claims** echo our challenge back as the `jti`. We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
 | `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key; new challenge as `jti`, **no `jwk`**) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
 | `GET  /api/protected` | Web client (Call protected button) | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
@@ -75,7 +75,7 @@ sequenceDiagram
     rect rgb(240, 246, 255)
     Note over W,S: Registration — once, at login (the Start session button here)
     W->>S: POST /start-form (user clicks Start session)
-    S-->>W: 303 to / + Secure-Session-Registration (algs, path, challenge)<br/>+ Set-Cookie correlation cookie
+    S-->>W: 200 + Secure-Session-Registration (algs, path, challenge)<br/>+ Set-Cookie login_auth_id
     Note over B: Reads the header, generates a device key pair<br/>private key stays in hardware
     B->>S: POST /dbsc/register (automatic) signed JWT<br/>jwk = public key, jti = challenge
     Note over S: Verify ES256 sig using the jwk<br/>(prod also checks jti == challenge)<br/>store session_identifier to public key
@@ -105,8 +105,8 @@ Plain-text version:
 ```
 ── Registration (once, at "login") ──────────────────────────────────
 You     → POST /start-form
-Server  → 303 to /  + Secure-Session-Registration (algs, path, challenge)
-                    + Set-Cookie (correlation cookie)
+Server  → 200  + Secure-Session-Registration (algs, path, challenge)
+               + Set-Cookie login_auth_id (login stand-in)
 Browser makes a device key pair (private key stays in hardware)
 Browser → POST /dbsc/register   (signed JWT: jwk = public key, jti = challenge)
 Server verifies sig via jwk, stores session_identifier → public key,
@@ -353,7 +353,7 @@ Flow 3:  Secure-Session-Challenge:    "refchal5"; id="sess3"
 | | Flow 1 — `Secure-Session-Registration` | Flow 3 — `Secure-Session-Challenge` |
 |---|---|---|
 | **Job** | Start a **new** session | Re-prove an **existing** session |
-| **Who initiates** | Server **invites** (rides the login/303) | Server **responds** to the browser's own refresh attempt |
+| **Who initiates** | Server **invites** (rides the login 200 response) | Server **responds** to the browser's own refresh attempt |
 | `(ES256)` algorithm | ✅ negotiate the alg (once) | ❌ already agreed at registration |
 | `path=` endpoint | ✅ where to POST the proof | ❌ browser already knows `refresh_url` (from the config) |
 | **challenge** | ✅ as a `challenge="…"` **parameter** | ✅ as the **main value** `"refchal5"` |
@@ -488,8 +488,9 @@ over both `localhost` and a real HTTPS domain, for both `fetch()` and navigation
 5. **Header names are `Secure-Session-*`** (registration/response/challenge) and
    `Sec-Secure-Session-Id`. The Chrome docs get this right; lots of *older blog posts /
    search results* still show the obsolete `Sec-Session-*` — don't copy those.
-6. **Registration must ride a form-POST → 303**; Chrome ignores the header on a plain GET
-   navigation or a `fetch()` response.
+6. **Registration must ride the response to a top-level navigation** — a plain `200` (like the
+   Chrome docs and `dbsc-php`) or a `303`/`302` redirect both work. Chrome **ignores** it on a
+   `fetch()`/XHR response, so the trigger must be a real navigation (form submit or link), not JS.
 7. **Refresh challenge must return `403`** (not 401) — Chrome only re-signs on 403.
 8. **Challenges should be short & alphanumeric** — Chrome is picky.
 9. **Reject unknown sessions with `404`** or persisted sessions cause an infinite
@@ -532,7 +533,7 @@ which Chrome silently ignores. The docs never said that.)
 
 | # | Chrome docs | This project | Why |
 |---|-------------|--------------|-----|
-| 1 | Emits `Secure-Session-Registration` on the **login response** (`200` + a long-lived cookie). | Emits it on a **form-POST → `303` redirect** (the *Start session* button). | A hello-world has no real login. A button submitting a form is the simplest trigger, and the `303`-redirect shape (matching the reference test server) is what reliably makes Chrome start registration. Functionally it's still "a POST whose response carries the header." |
+| 1 | Emits `Secure-Session-Registration` on the **login response** (`200` + a long-lived cookie). | Emits it on the *Start session* form-POST response, also a **`200`** (matching the docs). | A hello-world has no real login; the button standing in for it POSTs to `/start-form`, whose `200` response carries the header — the same shape as a real login. (A `303` redirect works too; drubery uses one.) |
 | 2 | Registration header example: `(ES256 RS256); path="/StartSession"` — **no `challenge`**. | We add `challenge="…"` and `authorization="…"`. | The `challenge` is echoed back in the JWT's `jti`, which is how a real server does anti-replay; both are permitted by the [spec](https://w3c.github.io/webappsec-dbsc/). Harmless to include. |
 | 3 | Bound cookie: `Max-Age=600` (10 min), `SameSite=Lax`, `Secure`. | `Max-Age=20`, `SameSite=Lax`, `Secure`, `HttpOnly`, host-only (no `Domain`). | 20s makes the auto-refresh observable within seconds. `SameSite=Lax` matches the docs; `Secure`+`HttpOnly`+host-only matches the production lib [`report-uri/dbsc-php`](https://github.com/report-uri/dbsc-php). |
 | 4 | **No enablement steps** (it documents shipped/production behavior). | Requires Chrome flags: **`Enabled – For developers`**, **UnexportableKeyService**, software-keys. | On macOS, DBSC is still "manual testing"; those flags (from the [testing wiki](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC)) skip the Origin-Trial-token check and let the OS generate the device key. Without them Chrome silently does nothing on `localhost`. |
@@ -580,9 +581,9 @@ established **after** registration — just without overloading one name.
 ### vs. the official reference server ([drubery/dbsc-test-server](https://github.com/drubery/dbsc-test-server))
 
 This is the Chrome team's reference DBSC test server (TypeScript/Deno, live at
-`https://drubery-dbsc-test-server.deno.dev/`). **Our implementation is modeled on it** —
-the two things that differ from the Chrome-doc example (the **form-POST→`303` trigger** and
-the **`challenge` parameter**) come straight from this server, and it uses the same
+`https://drubery-dbsc-test-server.deno.dev/`). **Our implementation is modeled on it** — the
+**form-POST trigger** and the **`challenge` parameter** come straight from this server (though we
+now return `200` like the Chrome docs, whereas drubery uses a `303` redirect), and it uses the same
 `Secure-Session-*` headers and `403` refresh. So "our way" *is* essentially "the reference
 way." Where we differ, it's because **we simplified** or because we run on **localhost**:
 
@@ -676,10 +677,10 @@ a response your app *already* sends. The natural home is the **login response**.
 - Status is `303`/`302` **or** `200` — whatever your login already returns. It is **not**
   `403`/`401` (those would make Chrome report a Challenge Error). `403` belongs only to the
   `/dbsc/refresh` challenge. Registration is single-phase; refresh is two-phase.
-- The header **must ride the response to a POST navigation**, never a `fetch()`/XHR response
-  or a plain GET (Chrome silently drops it there — see §6, learning 6). So the button here is
-  a stand-in for the login POST; a real app deletes it and the `/start-form` handler and
-  merges that `303`-with-header logic into `POST /login`.
+- The header **must ride the response to a top-level navigation** (the login POST/GET), never a
+  `fetch()`/XHR response (Chrome silently drops it there — see §6, learning 6). So the button here
+  is a stand-in for the login; a real app deletes it and the `/start-form` handler and merges that
+  header-on-the-login-response logic into `POST /login` (a `200` or a redirect — both work).
 - **No feature detection needed:** always send the header. DBSC-capable browsers register;
   others ignore it and continue on normal cookies (additive, can't lock anyone out).
 
