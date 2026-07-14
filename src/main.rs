@@ -1,8 +1,8 @@
 //! DBSC (Device Bound Session Credentials) hello-world.
 //!
 //! A small HTTPS server that makes the DBSC handshake *visible* so you can learn it.
-//! Each request/response pair is logged to stdout as a numbered FLOW. See README.md: what
-//! DBSC is, the required Chrome flags, the sequence diagram, and what works vs. not.
+//! Each request/response pair is logged to stdout as a numbered FLOW. See README.md for the
+//! protocol, the crypto, server-side state, and the WebSocket notes.
 //!
 //! Endpoints (see README for the flow):
 //!   GET  /               – the demo page (Start session / Call protected / Logout buttons)
@@ -57,7 +57,7 @@ fn cfg() -> &'static Config {
 /// Default bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). 300 (5 min)
 /// matches report-uri/dbsc-php and keeps the cookie reliably present when you click a protected page
 /// (a 20s cookie is often expired at click time). Override at runtime with `DBSC_COOKIE_MAX_AGE` —
-/// e.g. `DBSC_COOKIE_MAX_AGE=20` to force the *stale-cookie* case and watch a refresh fire (§11).
+/// e.g. `DBSC_COOKIE_MAX_AGE=20` to force the *stale-cookie* case and watch refreshes fire.
 const COOKIE_MAX_AGE_SECS: u64 = 300;
 /// Session (binding) lifetime — how long the server keeps the device binding. Tie this to your
 /// login/session TTL (e.g. a 30-day "remember me"). Independent of the short bound-cookie lifetime.
@@ -73,9 +73,8 @@ struct PubKey {
     y: String,
 }
 
-/// What a production DBSC server stores **per session** — a minimal version of
-/// report-uri/dbsc-php's `Binding` (and README §9.5). Its existence in the store *is* the
-/// "this session is device-bound" mark. Keyed by a stable session id.
+/// What a production DBSC server stores **per session** — a minimal `Binding`. Its existence in
+/// the store *is* the "this session is device-bound" mark. Keyed by a stable session id.
 ///
 /// This demo has no real login, so we key by the DBSC `session_identifier` and use a placeholder
 /// `user_id`. A real server keys by the stable **app session id** and stores the real user.
@@ -92,8 +91,8 @@ struct Binding {
 
 /// Written when we OFFER registration (Flow 1) and consumed at `/dbsc/register` (Flow 2). Holds
 /// the challenge we issued so `register` can check the JWT's `jti` against it (anti-replay). Keyed
-/// by `login_auth_id`. Modeled on report-uri/dbsc-php's `PendingRegistration` — the two-record
-/// model: a *pending registration* at the trigger, a *Binding* only on success.
+/// by `login_auth_id`. The two-record model: a *pending registration* at the trigger, a *Binding*
+/// only on success.
 #[derive(Clone)]
 struct PendingRegistration {
     challenge: String,
@@ -101,8 +100,8 @@ struct PendingRegistration {
 }
 
 /// In-memory stores. A real server uses Redis or a table keyed by the stable app session id in a
-/// **dedicated** key space (never a shared session blob — see §9.5). Cleared on restart, so
-/// browser-persisted sessions become "unknown" on refresh (→ 404, dropped).
+/// **dedicated** key space (never a shared session blob). Cleared on restart, so browser-persisted
+/// sessions become "unknown" on refresh (→ 404, dropped).
 #[derive(Clone, Default)]
 struct AppState {
     /// session_identifier -> Binding (the established device-bound session).
@@ -134,10 +133,8 @@ fn flow_header(n: u8, title: &str) {
 }
 
 /// ALL incoming `Cookie:` header values, joined with "; ". HTTP allows **multiple** `Cookie`
-/// headers, and `headers.get()` returns only the FIRST — so a cookie Chrome puts in a *second*
-/// `Cookie` header (which is exactly what it does for the DBSC-managed cookie) would be silently
-/// missed. Reading `get_all` is the fix — this is why our earlier checks reported `false` even
-/// though DevTools showed the bound cookie on the request (see §5).
+/// headers (HTTP/2, and Chrome puts the DBSC-managed cookie in its own), and `headers.get()`
+/// returns only the FIRST — so we must read `get_all` or silently miss the bound cookie.
 fn cookie_in(headers: &HeaderMap) -> String {
     let joined = headers
         .get_all(header::COOKIE)
@@ -370,12 +367,12 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
         }
         Some(p) => println!("            challenge OK: jti matches the issued challenge ({})", p.challenge),
     }
-    // (A production server would ALSO reject if !verified and check `authorization`; we still
-    // "log & continue" on the ES256 signature to keep the demo forgiving — see README §9.2.)
+    // (A production server would ALSO reject if !verified and check `authorization`; this demo
+    // "logs & continues" on the ES256 signature so you can watch every step.)
 
-    // Build the per-session record a production server would persist (see the `Binding` struct
-    // and §9.5). In this demo user_id is a placeholder (no real login); a real app stores the
-    // authenticated user and keys the store by its own session id.
+    // Build the per-session record a production server would persist (see the `Binding` struct).
+    // In this demo user_id is a placeholder (no real login); a real app stores the authenticated
+    // user and keys the store by its own session id.
     let session_id = nonce("sess");
     let cookie_value = nonce("cookie");
     let binding = Binding {
@@ -479,17 +476,14 @@ fn session_response(session_id: &str, cookie_value: &str) -> Response {
         "session_identifier": session_id,
         "refresh_url": "/dbsc/refresh",
         // Scope = which requests Chrome manages the bound cookie for. include_site:false =
-        // this origin only; omitting scope_specification (like report-uri/dbsc-php) means Chrome
-        // manages the cookie for ALL paths on the origin by default. (An explicit include rule
-        // also works — it was never the problem; the delivery bug was reading only the first
-        // Cookie header, see §5.)
+        // this origin only; omitting scope_specification means Chrome manages the cookie for ALL
+        // paths on the origin by default (an explicit include/exclude rule would scope by path).
         "scope": {
             "origin": cfg().origin.as_str(),
             "include_site": false
         },
-        // The cookie Chrome treats as device-bound. Host-only (no Domain) + Secure +
-        // HttpOnly, matching the production reference lib (report-uri/dbsc-php). A fresh
-        // value is minted every register/refresh (re-using the old value makes Chrome
+        // The cookie Chrome treats as device-bound. Host-only (no Domain) + Secure + HttpOnly.
+        // A fresh value is minted every register/refresh (re-using the old value makes Chrome
         // think "no refresh happened" and drop the session).
         "credentials": [{
             "type": "cookie",
@@ -498,9 +492,9 @@ fn session_response(session_id: &str, cookie_value: &str) -> Response {
         }]
     });
 
-    // SameSite=Lax (not Strict): matches the Chrome docs + both reference libs. Lax keeps the
-    // cookie working when the user arrives via an external top-level link; Strict would drop it
-    // on that first navigation (login-UX cost) for no real gain on a hardware-bound cookie.
+    // SameSite=Lax (not Strict): Lax keeps the cookie working when the user arrives via an
+    // external top-level link; Strict would drop it on that first navigation (login-UX cost)
+    // for no real gain on a hardware-bound cookie.
     let set_cookie = format!(
         "{}={cookie_value}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
         cfg().cookie_name,
@@ -536,10 +530,9 @@ async fn protected(headers: HeaderMap) -> Response {
 /// **here, in the upgrade request's headers** — the same `HeaderMap` + helpers as `/api/protected`.
 /// We report the result over the socket, then close.
 ///
-/// What to watch in DevTools: the bound cookie should attach to a same-origin `wss://` handshake
-/// just like any credentialed GET (→ `authenticated=true`). The open DBSC question is whether Chrome
-/// **defers + refreshes** the handshake when the cookie is *stale* (as it does for fetch/nav). If so,
-/// you'll see a `/dbsc/refresh` FLOW fire right before the handshake completes.
+/// The bound cookie attaches to a same-origin `wss://` handshake like any credentialed GET
+/// (→ `authenticated=true`), and Chrome refreshes it as needed — DBSC covers the *handshake*. It
+/// does NOT cover the open connection (see `ws_stream`).
 async fn ws_protected(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     let _log = LOG_LOCK.lock().unwrap();
     let cookie = cookie_in(&headers);
