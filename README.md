@@ -833,16 +833,48 @@ replies over the socket with `{ "authenticated": …, "transport": "websocket" }
 | **Delivery:** does the bound cookie ride a `wss://` handshake? | **Yes** — a same-origin WS upgrade is a normal credentialed GET, so `__Host-auth_cookie` attaches → `authenticated=true` (after you register a session). | FLOW 5 (WS) in the terminal; DevTools → Network → the `/ws` request → **Cookie** header. |
 | **Deferral/refresh:** if the cookie is *stale* at handshake time, does Chrome **defer the upgrade and refresh first** (as it does for `fetch()`/navigations)? | **Version-dependent — now being wired up.** Early DBSC deferred only regular HTTP requests, not WS upgrades. Chromium has since added handshake deferral for WebSockets ([CL 7173849](https://chromium-review.googlesource.com/c/chromium/src/+/7173849)), so a **recent** Chrome should refresh first; an older one won't. This probe tells you which behaviour *your* build has. | Let the bound cookie expire (`Max-Age=300`), then click the WS button. **If** a `POST /dbsc/refresh` FLOW fires *right before* the handshake completes → deferral covers WS in your Chrome. If the handshake goes out with a stale/absent cookie and **no** refresh precedes it → your build doesn't defer WS yet. |
 
-> **Confirmed (macOS Chrome):** the bound cookie **does ride the `wss://` handshake** — `/ws` logs
-> `authenticated=true` with `__Host-auth_cookie=…` present in the upgrade request's `Cookie` header,
-> exactly like `/api/protected`. That settles the **delivery** question ✅ (tested with a *fresh*
-> cookie). The **deferral** question — stale cookie → refresh *before* the handshake — still needs
-> the stale-cookie test below.
+**Confirmed so far (macOS Chrome):**
 
-> **Testing tip (the deferral case):** to force a stale cookie, lower `COOKIE_MAX_AGE_SECS` (e.g. to
-> `20`), register a session, wait for the cookie to expire *without* triggering any other request,
-> then click the WS button and watch whether a `POST /dbsc/refresh` FLOW fires ahead of the `/ws`
-> handshake.
+- **Delivery ✅** — the bound cookie **rides the `wss://` handshake**: `/ws` logs `authenticated=true`
+  with `__Host-auth_cookie=…` in the upgrade request's `Cookie` header, exactly like `/api/protected`
+  (tested with a *fresh* cookie).
+- **No per-request refresh** — repeated WS calls within the cookie's lifetime all carry the **same**
+  cookie value; Chrome doesn't rotate/refresh per request, only near expiry.
+- **Revocation propagates to WS ✅** — after `/logout` (delete binding + `Clear-Site-Data`), the next
+  WS handshake carries `Cookie: (none)` → `authenticated=false`. (We also saw Chrome attempt a
+  cookieless `POST /dbsc/refresh` *after* logout; the server's **404** unknown-session response is
+  what actually dropped the session — `Clear-Site-Data: "cookies"` clears the cookie, the 404 ends
+  the DBSC session.)
+- **Deferral ❓ (still to test)** — the stale-cookie → refresh-*before*-handshake case. Every run so
+  far was fresh-cookie or post-revocation, so this isn't demonstrated yet. Use the tip below.
+
+> **Testing tip (the deferral case):** run `DBSC_COOKIE_MAX_AGE=20 cargo run` to force a short-lived
+> bound cookie, register a session, wait ~20s *without* triggering any other request, then click the
+> WS button and watch whether a `POST /dbsc/refresh` FLOW fires **ahead of** the `/ws` handshake
+> (→ deferral covers WS in your Chrome) or the handshake goes out stale with no preceding refresh
+> (→ it doesn't yet).
+
+### Is WebSocket *fully* DBSC-compatible? A checklist
+
+DBSC treats the WS **handshake** like any other HTTP request, so "100% compatible" means the same
+guarantees hold at handshake time — plus one WS-specific caveat. Work down this list:
+
+| # | Check | What it proves | How to test |
+|---|-------|----------------|-------------|
+| 1 | **Delivery** — cookie rides a same-origin `wss://` handshake | Basic coverage | ✅ done — `/ws` → `authenticated=true` |
+| 2 | **Deferral** — a *stale* cookie makes Chrome refresh **before** the handshake | The core DBSC mechanism applies to WS | `DBSC_COOKIE_MAX_AGE=20 cargo run`, register, wait ~20s, click WS → look for a `/dbsc/refresh` FLOW *before* `/ws` |
+| 3 | **Reconnect** — drop the socket, let the cookie expire, reconnect | A new handshake re-triggers refresh/deferral | Open WS, close it, wait for expiry, reopen → expect a refresh then a fresh cookie on the new handshake |
+| 4 | **Stolen-cookie dies** — copy `__Host-auth_cookie` to another client and open `/ws` | The anti-theft payoff: a lifted cookie works only until expiry and **can't be refreshed** (no device key) | `curl`/another browser with the copied cookie: it authenticates until `Max-Age`, then the device-less client can't refresh → handshake goes dead. (This demo *logs-and-continues*; a real server **rejects** — §9.2.) |
+| 5 | **Cross-origin** — open the WS from a different origin | Host-only + `SameSite=Lax` keep the bound cookie off foreign handshakes | A `wss://` from another origin must **not** carry `__Host-auth_cookie` → `authenticated=false` |
+| 6 | **Refresh not self-deferred** — the refresh triggered by a WS never blocks on itself | No deadlock | Chrome auto-excludes `refresh_url` from scope; confirm the `/dbsc/refresh` in check #2 isn't itself deferred |
+
+> ⚠️ **The one real caveat — DBSC secures the handshake, not the open connection.** Cookies are
+> checked **once, at the upgrade**; WS *frames* carry none. So a socket opened while the cookie was
+> valid **stays open** after that cookie expires *or the session is revoked* — nothing re-checks it
+> mid-stream (you saw this: revocation only affected the *next* handshake, not a live socket). This
+> is inherent to WebSockets, not a DBSC bug. For sensitive WS traffic, add **app-level** handling:
+> close live sockets on revoke, and/or periodically re-auth in-band. DBSC hardens *getting* the
+> connection; keeping a long-lived one secure is still on you.
 
 ### Why axum's WebSocket support, not raw `tungstenite`
 This server uses `axum::extract::ws` (enabled via `axum`'s **`ws`** feature), which is built on

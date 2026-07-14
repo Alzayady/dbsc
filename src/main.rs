@@ -47,14 +47,16 @@ struct Config {
     tls_cert: String,    // DBSC_TLS_CERT    — PEM cert path
     tls_key: String,     // DBSC_TLS_KEY     — PEM key path
     cookie_name: String, // DBSC_COOKIE_NAME — device-bound cookie name (default __Host-auth_cookie)
+    cookie_max_age: u64, // DBSC_COOKIE_MAX_AGE — bound-cookie lifetime in seconds (default 300)
 }
 static CONFIG: OnceLock<Config> = OnceLock::new();
 fn cfg() -> &'static Config {
     CONFIG.get().expect("CONFIG not initialized (set in main before serving)")
 }
-/// Bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). Set to 300 (5 min)
-/// to match report-uri/dbsc-php and keep the cookie reliably present when you click a protected
-/// page (a 20s cookie is often expired at click time). Lower it to watch refreshes more often.
+/// Default bound-cookie lifetime, in SECONDS (RFC 6265 `Max-Age` is seconds, not ms). 300 (5 min)
+/// matches report-uri/dbsc-php and keeps the cookie reliably present when you click a protected page
+/// (a 20s cookie is often expired at click time). Override at runtime with `DBSC_COOKIE_MAX_AGE` —
+/// e.g. `DBSC_COOKIE_MAX_AGE=20` to force the *stale-cookie* case and watch a refresh fire (§11).
 const COOKIE_MAX_AGE_SECS: u64 = 300;
 /// Session (binding) lifetime — how long the server keeps the device binding. Tie this to your
 /// login/session TTL (e.g. a 30-day "remember me"). Independent of the short bound-cookie lifetime.
@@ -196,6 +198,9 @@ async fn main() {
         tls_cert: env("DBSC_TLS_CERT", "localhost+2.pem"),
         tls_key: env("DBSC_TLS_KEY", "localhost+2-key.pem"),
         cookie_name: env("DBSC_COOKIE_NAME", "__Host-auth_cookie"),
+        cookie_max_age: env("DBSC_COOKIE_MAX_AGE", &COOKIE_MAX_AGE_SECS.to_string())
+            .parse()
+            .unwrap_or(COOKIE_MAX_AGE_SECS),
     });
 
     let state = AppState::default();
@@ -491,8 +496,9 @@ fn session_response(session_id: &str, cookie_value: &str) -> Response {
     // cookie working when the user arrives via an external top-level link; Strict would drop it
     // on that first navigation (login-UX cost) for no real gain on a hardware-bound cookie.
     let set_cookie = format!(
-        "{}={cookie_value}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; Secure; HttpOnly; SameSite=Lax",
-        cfg().cookie_name
+        "{}={cookie_value}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
+        cfg().cookie_name,
+        cfg().cookie_max_age
     );
     println!("  RESPONSE: 200 OK");
     println!("            Set-Cookie: {set_cookie}");
