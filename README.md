@@ -541,6 +541,42 @@ which Chrome silently ignores. The docs never said that.)
 | 7 | Doesn't discuss server session lifecycle. | We **reject unknown sessions with `404`**. | Our session store is in-memory and resets on restart, but the browser persists sessions — without the `404` those stale sessions refresh forever (a storm). |
 | 8 | Implies the bound cookie is delivered to your app's requests. | Same — it **is** delivered (`authenticated=true`), once the server reads **all** `Cookie` headers. | Chrome splits cookies across multiple `Cookie` headers (the bound cookie in its own); reading only the first made it *look* undelivered — a demo bug, not a DBSC limitation (see §5). |
 
+### Cookie strategy: the docs transition ONE cookie; we use two
+
+A common point of confusion is the Chrome docs' **"Modify login flow"** example, which sets the
+bound cookie *at login* — before registration:
+
+```
+HTTP/1.1 200 OK                                                        ← login response
+Secure-Session-Registration: (ES256 RS256); path="/StartSession"
+Set-Cookie: auth_cookie=session_id; max-age=2592000                    ← LONG-LIVED (30 days)
+```
+
+That `auth_cookie` is **not the device-bound cookie yet** — it's your **ordinary long-lived login
+cookie**. Then the registration endpoint *replaces the same cookie* with a short-lived value
+(the docs say "Transitions to short-lived cookies"):
+
+```
+HTTP/1.1 200 OK                                                        ← /StartSession response
+Set-Cookie: auth_cookie=short_lived_grant; Max-Age=600                 ← now SHORT-LIVED + DBSC-managed
+```
+
+So the docs use **one cookie name** and change its lifetime: long-lived at login → short-lived +
+device-bound after registration. Why set it at login at all? So the user is **logged in
+immediately** (you can't wait for the async registration), and so a **non-DBSC browser** just keeps
+using the long-lived cookie (graceful degradation / fallback).
+
+**This project keeps them as two separate cookies instead** (like `report-uri/dbsc-php`):
+`login_auth_id` (the login stand-in, §3) and a *distinct* short-lived bound cookie (`auth_cookie`)
+that is only ever set at register/refresh. Same end result — the bound (short-lived) cookie is
+established **after** registration — just without overloading one name.
+
+| | Chrome docs | This project / `dbsc-php` |
+|---|-------------|---------------------------|
+| Cookie names | **one** (`auth_cookie`) | **two** (login cookie + a separate bound cookie) |
+| At login | `auth_cookie` = long-lived session token | login cookie set (`login_auth_id` / `PHPSESSID`) |
+| After register | **same** `auth_cookie` overwritten → short-lived, device-bound | a **separate** short-lived bound cookie is set |
+
 ### vs. the official reference server ([drubery/dbsc-test-server](https://github.com/drubery/dbsc-test-server))
 
 This is the Chrome team's reference DBSC test server (TypeScript/Deno, live at
