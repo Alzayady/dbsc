@@ -308,7 +308,8 @@ Set-Cookie: login_auth_id=login11; Path=/; Max-Age=3600                        �
 - `Path=/` is ordinary cookie plumbing, nothing DBSC-specific ("send this cookie on any URL
   under `/`"). It's `/` here so the correlation cookie is guaranteed to ride along on the very
   next request — the `POST /dbsc/register` — which is how the reference server correlates that
-  call back to the login. (This demo sets the cookie but doesn't read it — see §7.)
+  call back to the login. (This demo now **reads** it at `/register` to look up the pending
+  challenge — see §7.)
 
 So one is "**where to send the proof**", the other is "**which URLs this cookie is sent for**".
 
@@ -426,25 +427,8 @@ old persisted DBSC sessions before a fresh run.
 | Result | Status |
 |--------|--------|
 | DBSC handshake — register + refresh, ES256 verified vs. stored key | ✅ works |
-| Bound cookie reaches `/api/protected` (**`fetch()`**) → `authenticated=true` | ✅ works |
-| Bound cookie reaches `/protected-page` (**navigation**) → `authenticated=true` | ✅ works |
+| Bound cookie reaches `/api/protected` → `authenticated=true` | ✅ works |
 | Stale-session handling — unknown session ids get `404` | ✅ works |
-
-### The bug that made it look broken (and the fix)
-`/api/protected` reported `authenticated=false` for a long time even though DevTools clearly showed
-the bound cookie on the request. Cause: **Chrome sends cookies across more than one `Cookie:`
-request header** — ordinary cookies in one, the **DBSC-managed cookie in a separate header** — and
-the server read only the **first** via `headers.get(COOKIE)`. The bound cookie sat in the *second*
-header, so it was never seen. Fix: read **all** headers with `headers.get_all(COOKIE)` (see
-`has_bound_cookie` / `cookie_in` in `src/main.rs`). Post-fix, the logs show it plainly:
-
-```
-FLOW 6: PROTECTED PAGE
-  raw Cookie header count = 2
-  Cookie[0]: login_auth_id=login2
-  Cookie[1]: __Host-auth_cookie=cookie4      ← the bound cookie, in a SECOND Cookie header
-  authenticated=true
-```
 
 ### ✅ Works (verified in the server logs)
 - **Registration** — Chrome generates a device key, signs a JWT (`typ: dbsc+jwt`), and the
@@ -589,8 +573,8 @@ way." Where we differ, it's because **we simplified** or because we run on **loc
 
 | Aspect | Reference server | This project | Why we differ |
 |--------|------------------|--------------|---------------|
-| Correlation cookie | Sets `dbsc-registration-sessions-id` in the form handler **and reads it** in `/register` to look up the pending session. | Sets `login_auth_id` (our stand-in name) but **doesn't read it** — `/register` just mints a fresh `session_identifier`. | Kept the demo minimal; correlation isn't needed when we create the session on the fly. |
-| JWT claim checks | Verifies signature **and** that `jti` == the issued challenge and `authorization` == the auth code. | We verify the **signature only** (log the claims). | Simpler to read; the signature is the core proof-of-possession. |
+| Correlation cookie | Sets `dbsc-registration-sessions-id` in the form handler **and reads it** in `/register` to look up the pending session. | Sets `login_auth_id` **and reads it** at `/register` to look up the `PendingRegistration` (the stored challenge), then mints the `session_identifier`. | Same idea, our stand-in name. |
+| JWT claim checks | Verifies signature **and** that `jti` == the issued challenge and `authorization` == the auth code. | We check **`jti` == the issued challenge** (via the pending record, single-use); the ES256 **signature** we compute but log-and-continue (don't reject). | The challenge check is the interesting one to show; hard-rejecting on the signature is left as §9.2. |
 | Enablement | Ships an **Origin-Trial token** (`origin-trial` header) valid for its real `deno.dev` domain. | Uses **Chrome testing flags** on `localhost`. | `localhost` can't carry a domain-bound OT token, so we take the flags door instead. |
 | Scope / cookie config | A form lets you set scope include/exclude paths, cookie name/value/lifetime at runtime. | **Hardcoded** (whole-origin scope, `__Host-auth_cookie`, 5 min). | A hello-world doesn't need the knobs. |
 | Protected endpoint | **None** — it only shows a session table. | We added **`/api/protected`** to test cookie delivery. | To make "is the bound cookie delivered?" observable (which surfaced our multi-`Cookie`-header parsing bug — §5). |
@@ -620,7 +604,7 @@ the challenge · offering only `(ES256)` in the registration header (not the Chr
 | Shape | Framework-agnostic **library**: `DbscServer` takes a `RequestContext`, returns a `DbscResponse`; never touches globals / headers / cookies itself. | A **runnable HTTPS server** you `cargo run`. | We want something you can launch and watch, not embed. |
 | Stack | PHP 8.1+, `ext-openssl`. | Rust + axum, `p256`. | Learning in Rust. |
 | Storage | Your `StoreInterface` (Redis / table), keyed by the **stable app session id** in a **dedicated key space** — never a shared session blob (a race there clobbers the binding and silently disables enforcement). | In-memory `HashMap` keyed by the **DBSC `session_identifier`**, cleared on restart. | A hello-world has no login / app-session; the map is enough to demo register→refresh. |
-| JWT checks | **Rejects** (throws) on bad signature, wrong / expired challenge (`jti` vs stored, constant-time), or `alg≠ES256`. | Pins `alg=ES256` and *computes* signature validity, but **logs & continues** — never rejects; `jti` not checked. | Deliberate demo shortcut so even a failed check still shows the flow. A real server must reject — the code comment says exactly this. |
+| JWT checks | **Rejects** (throws) on bad signature, wrong / expired challenge (`jti` vs stored, constant-time), or `alg≠ES256`. | Rejects on `alg≠ES256` and on a bad/expired **`jti`** at registration (via the pending record); still **log-and-continues** on the ES256 signature, and doesn't check `jti` on refresh. | We show the challenge check; hard-rejecting on the signature everywhere is the remaining §9.2 step. |
 | Challenge | 32 crypto-random bytes, single-use; `challengeTtl` **must exceed `cookieMaxAge`** (enforced in `Config`) so a challenge cached just before expiry still validates. | Monotonic counter (`chal1`, `chal2`, …), not verified. | Not security-relevant in a demo; short & alphanumeric keeps Chrome happy. |
 | Registration header | `(ES256); path="/dbsc/register"; challenge="…"` — **no** `authorization`. | Same, but we add `authorization="auth-code-123"`. | Both are spec-legal; we include it to show where an auth code would ride. |
 | Bound cookie | `__Host-dbsc` (default), `Max-Age=300`, `SameSite=Lax`. | `__Host-auth_cookie`, `Max-Age=300`, `SameSite=Lax`. | Same shape — both use the `__Host-` prefix and a 5-minute lifetime. |
@@ -686,11 +670,14 @@ a response your app *already* sends. The natural home is the **login response**.
 
 ### 9.2 Actually enforce (the security payoff — currently missing)
 
-Today `/dbsc/register` and `/dbsc/refresh` **log** verification and continue. A real server
-must:
+The demo now **rejects** on `alg≠ES256` and, at registration, on a **`jti` that doesn't match the
+issued challenge** (or an expired one) — via the `PendingRegistration` record (§9.5). It still
+"logs & continues" on the **ES256 signature itself** and doesn't check `jti` on *refresh*. A real
+server tightens the rest:
 
-- **Reject** on any failed check: `alg≠ES256`, bad signature, and `jti` ≠ the challenge we
-  issued (and, at registration, the `authorization` code). Use constant-time comparison.
+- **Reject** on *every* failed check: `alg≠ES256`, **bad signature**, and `jti` ≠ the challenge we
+  issued — on **both** register and refresh (and check the `authorization` code). Use
+  constant-time comparison.
 - Add an **enforcement gate** on protected routes: if a session is bound (a binding exists)
   but the request's bound cookie is missing/mismatched, **revoke + log the user out** — don't
   just report `authenticated:false`. Enforce on document loads *and* subresources past a short
@@ -702,7 +689,8 @@ must:
 - **Real storage** keyed by a **stable session id** in a **dedicated key space** (Redis/DB),
   not an in-memory `HashMap` and not a shared session blob (the read-modify-write race
   clobbers the binding and silently disables enforcement).
-- **Crypto-random, single-use challenges** (not the demo's monotonic counter), with
+- **Crypto-random challenges** (the demo uses a monotonic counter — it now consumes them
+  single-use via the pending/binding records, but they're not random), with
   `challengeTtl > cookieMaxAge` so a challenge cached just before cookie expiry still validates.
 - **Revocation** on logout (delete state + emit a bound-cookie deletion).
 - **Latency-race overlap windows** (accept the single previous cookie value / challenge during
@@ -778,13 +766,14 @@ the browser cached just before the cookie expired is still valid when it's final
 `current_challenge` + `challenge_issued_at`, `created_at`, `expires_at`. Everything else is
 robustness/observability on top.
 
-> Mapping back to this demo: the `Binding` struct in `src/main.rs` implements a **minimal version
-> of this table** — `user_id`, `device_public_key`, `algorithm`, `cookie_value`, `challenge`,
-> `created_at`, `expires_at`, held in an in-memory `HashMap<session_identifier, Binding>` and
-> printed on every register/refresh (`STORE [created]` / `STORE [updated]`) so you can watch it.
-> What it still omits vs. production: real per-user keying (no login here), `jti`/expiry
-> *enforcement* (we log & continue — §9.2), crypto-random challenges, and the latency-race overlap
-> fields. So §9.2 + the extras above are the remaining gap between the demo and a real server.
+> Mapping back to this demo: `src/main.rs` implements a **minimal version of both records** — a
+> `PendingRegistration` (the issued challenge, keyed by `login_auth_id`) at Flow 1, and a `Binding`
+> (`user_id`, `device_public_key`, `algorithm`, `cookie_value`, `challenge`, `created_at`,
+> `expires_at`) at register — both in-memory and printed on each step (`STORE [pending]` /
+> `[created]` / `[updated]`) so you can watch them. Register now **checks `jti` == the issued
+> challenge** (single-use). What it still omits vs. production: real per-user keying (no login
+> here), rejecting on the ES256 **signature** and checking `jti` on **refresh** (§9.2),
+> crypto-random challenges, and the latency-race overlap fields.
 
 ---
 

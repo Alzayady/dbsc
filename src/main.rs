@@ -54,6 +54,9 @@ const COOKIE_MAX_AGE_SECS: u64 = 300;
 /// Session (binding) lifetime — how long the server keeps the device binding. Tie this to your
 /// login/session TTL (e.g. a 30-day "remember me"). Independent of the short bound-cookie lifetime.
 const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
+/// How long a registration challenge stays valid (the registration window). A real server pairs
+/// this with the refresh challenge TTL; here it just bounds the Flow 1 → Flow 2 handshake.
+const REG_CHALLENGE_TTL_SECS: u64 = 300;
 
 /// An EC P-256 public key (base64url X/Y coordinates), as carried in a device JWT's `jwk`.
 #[derive(Clone)]
@@ -79,13 +82,25 @@ struct Binding {
     expires_at: u64,           // unix secs — tie to your login/session lifetime
 }
 
-/// In-memory session store: `session_identifier -> Binding`. A real server uses Redis or a table
-/// keyed by the stable app session id in a **dedicated** key space (never a shared session blob —
-/// see §9.5). Cleared on restart, so browser-persisted sessions become "unknown" on refresh
-/// (→ 404, dropped).
+/// Written when we OFFER registration (Flow 1) and consumed at `/dbsc/register` (Flow 2). Holds
+/// the challenge we issued so `register` can check the JWT's `jti` against it (anti-replay). Keyed
+/// by `login_auth_id`. Modeled on report-uri/dbsc-php's `PendingRegistration` — the two-record
+/// model: a *pending registration* at the trigger, a *Binding* only on success.
+#[derive(Clone)]
+struct PendingRegistration {
+    challenge: String,
+    created_at: u64,
+}
+
+/// In-memory stores. A real server uses Redis or a table keyed by the stable app session id in a
+/// **dedicated** key space (never a shared session blob — see §9.5). Cleared on restart, so
+/// browser-persisted sessions become "unknown" on refresh (→ 404, dropped).
 #[derive(Clone, Default)]
 struct AppState {
+    /// session_identifier -> Binding (the established device-bound session).
     sessions: Arc<Mutex<HashMap<String, Binding>>>,
+    /// login_auth_id -> PendingRegistration (the issued challenge, awaiting the register proof).
+    pending: Arc<Mutex<HashMap<String, PendingRegistration>>>,
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -129,15 +144,20 @@ fn has_bound_cookie(headers: &HeaderMap) -> bool {
     bound_cookie_value(headers).is_some()
 }
 
-/// The VALUE of the device-bound cookie on this request (across all `Cookie` headers), if present.
-fn bound_cookie_value(headers: &HeaderMap) -> Option<String> {
-    let prefix = format!("{}=", cfg().cookie_name);
+/// The value of the cookie named `name` on this request (across all `Cookie` headers), if present.
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|h| h.split(';'))
         .find_map(|c| c.trim().strip_prefix(&prefix).map(str::to_string))
+}
+
+/// The VALUE of the device-bound cookie on this request, if present.
+fn bound_cookie_value(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, &cfg().cookie_name)
 }
 
 /// Current unix time in seconds (for the binding's created_at / expires_at).
@@ -222,9 +242,9 @@ async fn index() -> Html<&'static str> {
 /// begin device-bound registration.
 ///
 /// WIRE FORMAT (structured field): (algs); path="..."; challenge="..."; authorization="..."
-/// `path` = where Chrome will POST its signed proof; `challenge` is echoed back in the JWT.
-fn registration_header() -> (HeaderName, HeaderValue) {
-    let challenge = nonce("chal");
+/// `path` = where Chrome will POST its signed proof; `challenge` is echoed back in the JWT as `jti`.
+/// The caller mints the challenge and STORES it (a PendingRegistration) so `register` can verify it.
+fn registration_header(challenge: &str) -> (HeaderName, HeaderValue) {
     // Offer only ES256 (the only alg we verify). Pinning one alg also avoids
     // algorithm-confusion, matching the reference PHP lib.
     let value = format!(
@@ -241,15 +261,22 @@ fn registration_header() -> (HeaderName, HeaderValue) {
 /// docs' login response and `report-uri/dbsc-php` (which also emit the header on a plain 200). The
 /// header just has to ride the response to a top-level navigation (not a `fetch()`); 200 or a
 /// 303 redirect both work.
-async fn start_form() -> Response {
+async fn start_form(State(state): State<AppState>) -> Response {
     let _log = LOG_LOCK.lock().unwrap();
-    let (reg_name, reg_value) = registration_header();
-    // `login_auth_id` stands in for your real login/auth SESSION cookie: it's how the server
-    // will know *which logged-in user* the follow-up /dbsc/register POST belongs to. In a real
-    // app you don't set a separate cookie here — your existing login session cookie does this
-    // job (and rides the same-origin /register request automatically). This demo has no login,
-    // so we mint a placeholder. (We set it but don't actually read it — see README §3.)
+    let challenge = nonce("chal");
+    let (reg_name, reg_value) = registration_header(&challenge);
+    // `login_auth_id` stands in for your real login/auth SESSION cookie: it's how the server knows
+    // *which logged-in user* the follow-up /dbsc/register POST belongs to. In a real app you don't
+    // set a separate cookie here — your existing login session cookie does this (and rides the
+    // same-origin /register request automatically). This demo has no login, so we mint a placeholder.
     let login_auth_id = nonce("login");
+    // Store the issued challenge as a PendingRegistration keyed by login_auth_id, so /dbsc/register
+    // can verify the JWT's `jti` against it (anti-replay). This is the record that belongs at Flow 1
+    // — the Binding can't be created yet (no device key until register).
+    state.pending.lock().unwrap().insert(
+        login_auth_id.clone(),
+        PendingRegistration { challenge, created_at: now_secs() },
+    );
     let set_cookie = format!("login_auth_id={login_auth_id}; Path=/; Max-Age=3600");
 
     flow_header(1, "TRIGGER  (POST /start-form)");
@@ -257,6 +284,7 @@ async fn start_form() -> Response {
     println!("  RESPONSE: 200 OK");
     println!("            Secure-Session-Registration: {}", reg_value.to_str().unwrap_or("?"));
     println!("            Set-Cookie: {set_cookie}");
+    println!("  STORE [pending]  key(login_auth_id)={login_auth_id} -> challenge stored for /register to check");
 
     let mut headers = HeaderMap::new();
     headers.insert(reg_name, reg_value);
@@ -297,18 +325,39 @@ async fn register(State(state): State<AppState>, headers: HeaderMap, body: Strin
         return (StatusCode::BAD_REQUEST, "no jwk in JWT header").into_response();
     };
     let verified = verify_sig(&signing_input, &sig_b64, &pubkey);
-    let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?");
+    let jti = claims.get("jti").and_then(|j| j.as_str()).unwrap_or("?").to_string();
     println!("  REQUEST : POST /dbsc/register");
     println!("            Cookie: {}", cookie_in(&headers));
     println!("            Secure-Session-Response (JWT): {jwt}");
     println!("            decoded -> jwk=<device public key>, jti={jti}, ES256 verified={verified}");
-    // A production server would also check jti == the challenge it issued and
-    // authorization == its auth code, and REJECT if !verified. We log & continue.
+
+    // CHALLENGE CHECK: look up the PendingRegistration stored at Flow 1 (keyed by login_auth_id,
+    // which rides this request as a Cookie), and require the JWT's `jti` to equal the challenge we
+    // issued — and not be expired. `remove` consumes it so a challenge is single-use (anti-replay).
+    let now = now_secs();
+    let login = cookie_value(&headers, "login_auth_id");
+    let pending = login.as_ref().and_then(|k| state.pending.lock().unwrap().remove(k));
+    match pending {
+        None => {
+            println!("  RESPONSE: 400 no pending registration for login_auth_id={login:?} (challenge unknown)");
+            return (StatusCode::BAD_REQUEST, "no pending registration").into_response();
+        }
+        Some(p) if now.saturating_sub(p.created_at) > REG_CHALLENGE_TTL_SECS => {
+            println!("  RESPONSE: 400 registration challenge expired");
+            return (StatusCode::BAD_REQUEST, "registration challenge expired").into_response();
+        }
+        Some(p) if p.challenge != jti => {
+            println!("  RESPONSE: 400 challenge mismatch (jti={jti} != issued {})", p.challenge);
+            return (StatusCode::BAD_REQUEST, "challenge mismatch").into_response();
+        }
+        Some(p) => println!("            challenge OK: jti matches the issued challenge ({})", p.challenge),
+    }
+    // (A production server would ALSO reject if !verified and check `authorization`; we still
+    // "log & continue" on the ES256 signature to keep the demo forgiving — see README §9.2.)
 
     // Build the per-session record a production server would persist (see the `Binding` struct
     // and §9.5). In this demo user_id is a placeholder (no real login); a real app stores the
     // authenticated user and keys the store by its own session id.
-    let now = now_secs();
     let session_id = nonce("sess");
     let cookie_value = nonce("cookie");
     let binding = Binding {
