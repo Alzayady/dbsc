@@ -1,15 +1,16 @@
 //! DBSC (Device Bound Session Credentials) hello-world.
 //!
 //! A small HTTPS server that makes the DBSC handshake *visible* so you can learn it.
-//! Each request/response pair is logged to stdout as a numbered FLOW (1-5). See README.md: what
+//! Each request/response pair is logged to stdout as a numbered FLOW. See README.md: what
 //! DBSC is, the required Chrome flags, the sequence diagram, and what works vs. not.
 //!
 //! Endpoints (see README for the flow):
-//!   GET  /               – the demo page (Start session / Call protected buttons)
-//!   POST /start-form     – 200 carrying `Secure-Session-Registration` (starts DBSC)
-//!   POST /dbsc/register  – Chrome POSTs its signed proof JWT here; we verify + open a session
-//!   POST /dbsc/refresh   – Chrome re-proves possession here (challenge → signed retry → re-mint)
-//!   GET  /api/protected  – reports whether the device-bound cookie rode along
+//!   GET  /               – the demo page (Start session / Call protected / Logout buttons)
+//!   POST /start-form     – 200 carrying `Secure-Session-Registration` (starts DBSC)  [FLOW 1]
+//!   POST /dbsc/register  – Chrome POSTs its signed proof JWT here; we verify + open a session [FLOW 2]
+//!   POST /dbsc/refresh   – Chrome re-proves possession here (challenge → signed retry → re-mint) [FLOW 3/4]
+//!   GET  /api/protected  – reports whether the device-bound cookie rode along  [FLOW 5]
+//!   GET  /logout         – revoke: delete the binding, clear the cookie, end the DBSC session  [FLOW 6]
 //!
 //! DBSC headers use the `Secure-Session-*` names (plus `Sec-Secure-Session-Id`). Chrome's
 //! docs get these right; it's older blog posts / search results that still show the
@@ -519,7 +520,7 @@ async fn protected(headers: HeaderMap) -> Response {
 /// it finds the binding by the presented bound-cookie value (what a normal app request carries).
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let _log = LOG_LOCK.lock().unwrap();
-    flow_header(7, "LOGOUT / REVOKE  (GET /logout)");
+    flow_header(6, "LOGOUT / REVOKE  (GET /logout)");
 
     let presented = bound_cookie_value(&headers);
     let mut revoked = None;

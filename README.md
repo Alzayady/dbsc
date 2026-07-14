@@ -202,8 +202,7 @@ instruction sheet that lets Chrome run the whole session on its own (no page Jav
   "refresh_url": "/dbsc/refresh",
   "scope": {
     "origin": "https://localhost:3000",
-    "include_site": false,
-    "scope_specification": [ { "type": "include", "domain": "localhost", "path": "/" } ]
+    "include_site": false
   },
   "credentials": [ { "type": "cookie", "name": "__Host-auth_cookie",
                      "attributes": "Path=/; Secure; HttpOnly; SameSite=Lax" } ]
@@ -217,7 +216,7 @@ instruction sheet that lets Chrome run the whole session on its own (no page Jav
 | **`scope`** | **Which requests this session governs** — which must carry a fresh bound cookie (and which Chrome defers + refreshes for). |
 | ↳ `origin` | The origin the session belongs to. |
 | ↳ `include_site` | `false` = **this origin only** (no subdomain span); `true` = the whole registrable site (`*.example.com`). |
-| ↳ `scope_specification` | `include`/`exclude` rules by domain+path. Here one `include` of `/` → manage the cookie for **all paths**. Add `exclude` rules (e.g. `/static`) to leave paths unmanaged. |
+| ↳ `scope_specification` *(optional — we omit it)* | `include`/`exclude` rules by domain+path. **This demo omits it** (like `dbsc-php`), so Chrome manages the cookie for **all paths** on the origin by default. Add it with `exclude` rules (e.g. `/static`) to leave paths unmanaged. |
 | **`credentials`** | **Which cookie(s) Chrome treats as device-bound and keeps fresh.** |
 | ↳ `name` | Must **match the `Set-Cookie` name** (`__Host-auth_cookie`) or Chrome won't link them. |
 | ↳ `attributes` | The attribute template for the managed cookie (mirrors the `Set-Cookie`, minus `Max-Age`). |
@@ -518,7 +517,7 @@ which Chrome silently ignores. The docs never said that.)
 - **Refresh flow**: server challenges with **`403` + `Secure-Session-Challenge`**, the
   browser retries with `Secure-Session-Response`, server returns `200` + fresh cookie.
 - **Session-config JSON** shape: `session_identifier`, `refresh_url`, `scope`
-  (`origin` / `include_site` / `scope_specification`), `credentials`.
+  (`origin` / `include_site`; `scope_specification` is optional and we omit it), `credentials`.
 - **HTTPS required.**
 
 ### Where we differ, and why
@@ -528,7 +527,7 @@ which Chrome silently ignores. The docs never said that.)
 | 1 | Emits `Secure-Session-Registration` on the **login response** (`200` + a long-lived cookie). | Emits it on the *Start session* form-POST response, also a **`200`** (matching the docs). | A hello-world has no real login; the button standing in for it POSTs to `/start-form`, whose `200` response carries the header — the same shape as a real login. (A `303` redirect works too; drubery uses one.) |
 | 2 | Registration header example: `(ES256 RS256); path="/StartSession"` — **no `challenge`**. | We add `challenge="…"` and `authorization="…"`. | The `challenge` is echoed back in the JWT's `jti`, which is how a real server does anti-replay; both are permitted by the [spec](https://w3c.github.io/webappsec-dbsc/). Harmless to include. |
 | 3 | Bound cookie: `Max-Age=600` (10 min), `SameSite=Lax`, `Secure`. | `__Host-auth_cookie`, `Max-Age=300` (5 min), `SameSite=Lax`, `Secure`, `HttpOnly`, host-only. | Short lifetime keeps auto-refresh observable. `SameSite=Lax` matches the docs; the **`__Host-` prefix** (Secure + Path=/ + no Domain) matches the production lib [`report-uri/dbsc-php`](https://github.com/report-uri/dbsc-php). |
-| 4 | **No enablement steps** (it documents shipped/production behavior). | Requires Chrome flags: **`Enabled – For developers`**, **UnexportableKeyService**, software-keys. | On macOS, DBSC is still "manual testing"; those flags (from the [testing wiki](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC)) skip the Origin-Trial-token check and let the OS generate the device key. Without them Chrome silently does nothing on `localhost`. |
+| 4 | **No enablement steps** (it documents shipped/production behavior). | Uses Chrome testing flags — chiefly **`Enabled – For developers`** + **UnexportableKeyService** (on macOS the OS then mints a *software* key, not a Secure-Enclave one). | On macOS, DBSC is still "manual testing." We enabled the [testing-wiki](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC) flags **as a set** (not individually validated) to skip the Origin-Trial-token check and let the OS generate the device key. Without them Chrome silently does nothing on `localhost`. To find the minimal set, toggle each off and watch whether FLOW 2 still fires. |
 | 5 | Describes an optional **long-lived fallback cookie** for when refresh fails. | Not implemented. | Out of scope for a minimal demo. |
 | 6 | Barely specifies the **JWT** ("a public key in a JWT"). | We parse it fully: read the EC `jwk` from the JWT header at registration, verify ES256; on refresh verify against the **stored** key. | The docs punt JWT details to the spec; we implemented them so the proof is actually checked. |
 | 7 | Doesn't discuss server session lifecycle. | We **reject unknown sessions with `404`**. | Our session store is in-memory and resets on restart, but the browser persists sessions — without the `404` those stale sessions refresh forever (a storm). |
@@ -616,7 +615,7 @@ the challenge · offering only `(ES256)` in the registration header (not the Chr
 | Challenge | 32 crypto-random bytes, single-use; `challengeTtl` **must exceed `cookieMaxAge`** (enforced in `Config`) so a challenge cached just before expiry still validates. | Monotonic counter (`chal1`, `chal2`, …), not verified. | Not security-relevant in a demo; short & alphanumeric keeps Chrome happy. |
 | Registration header | `(ES256); path="/dbsc/register"; challenge="…"` — **no** `authorization`. | Same, but we add `authorization="auth-code-123"`. | Both are spec-legal; we include it to show where an auth code would ride. |
 | Bound cookie | `__Host-dbsc` (default), `Max-Age=300`, `SameSite=Lax`. | `__Host-auth_cookie`, `Max-Age=300`, `SameSite=Lax`. | Same shape — both use the `__Host-` prefix and a 5-minute lifetime. |
-| `scope` JSON | `origin` + `include_site:false`, **no `scope_specification`** (a `__Host-` cookie can't span subdomains anyway). | `origin` + `include_site:false` + an explicit `scope_specification` **include** rule. | Both work; we keep the explicit rule to make the scope visible. |
+| `scope` JSON | `origin` + `include_site:false`, **no `scope_specification`** (a `__Host-` cookie can't span subdomains anyway). | `origin` + `include_site:false`, **also no `scope_specification`**. | Same — Chrome then manages the cookie for all paths on the origin (an explicit `include` rule also works, but isn't needed). |
 | Enforcement | Full gate **primitives**: `getBinding`, constant-time `boundCookieMatches` (with a single-depth previous-value overlap for refresh races), document-vs-subresource, a registration grace window. The caller wires the policy. | None — just `/api/protected` reporting whether the cookie rode along. | We only *probe* delivery (which surfaced our cookie-parsing bug — §5); we don't gate. |
 | Refresh robustness | Single-depth **challenge + cookie overlap** windows for latency races; an optional single-phase **first** refresh via `advertiseRefreshChallenge`. | Straight `403`→proof→`200`, fresh cookie each time, no overlap. | Those windows matter under real network latency, not on loopback. |
 | Revoke / logout | `revoke()` deletes state + emits a cookie deletion (distinct enforcement-terminated vs logout audit events). | Not implemented. | Out of scope for the demo. |
@@ -785,12 +784,13 @@ robustness/observability on top.
 
 ---
 
-## 10. Deploy behind a real HTTPS domain to test cookie delivery
+## 10. Deploy behind a real HTTPS domain (optional)
 
-§5 showed the bound cookie isn't delivered to app requests on the **macOS + `localhost`** path.
-To retest on a **real, browser-trusted HTTPS origin**, the server is env-configurable (defaults =
-the local mkcert setup), so no code changes are needed — just point it at a real host's cert and
-origin:
+Cookie delivery is **confirmed working** on the **macOS + `localhost`** path (§5), so you don't
+*need* a real domain. But if you want to run the demo on a **real, browser-trusted HTTPS origin**
+anyway (to show it off your laptop, or to reconfirm delivery on a public host), the server is
+env-configurable (defaults = the local mkcert setup), so no code changes are needed — just point
+it at a real host's cert and origin:
 
 ```bash
 export DBSC_ORIGIN="https://example.com"        # your real, browser-facing origin
