@@ -468,21 +468,29 @@ over both `localhost` and a real HTTPS domain, for both `fetch()` and navigation
 2. **The cert must be trusted** — use `mkcert`, not a bare self-signed cert.
 3. **`Enabled – For developers`**, not plain "Enabled" (skips the Origin-Trial-token gate
    that blocks localhost).
-4. **UnexportableKeyService flag** is required on macOS to generate the device key.
+4. **UnexportableKeyService flag** — part of the macOS **testing setup** (from the DBSC testing
+   wiki) that lets the OS generate the device key. We ran with it enabled throughout and didn't
+   test whether registration works without it, so treat this as "per the setup," not proven.
 5. **Header names are `Secure-Session-*`** (registration/response/challenge) and
    `Sec-Secure-Session-Id`. The Chrome docs get this right; lots of *older blog posts /
    search results* still show the obsolete `Sec-Session-*` — don't copy those.
-6. **Registration must ride the response to a top-level navigation** — a plain `200` (like the
-   Chrome docs and `dbsc-php`) or a `303`/`302` redirect both work. Chrome **ignores** it on a
-   `fetch()`/XHR response, so the trigger must be a real navigation (form submit or link), not JS.
+6. **Registration rides the response to a top-level navigation** — a plain `200` (like the Chrome
+   docs and `dbsc-php`) or a `303`/`302` redirect both work; the docs and both reference servers
+   emit it on the login *navigation* response. (We also believe Chrome **ignores** it on a
+   `fetch()`/XHR response — so use a real navigation, form submit or link — but we didn't
+   re-verify the `fetch()` case rigorously this round.)
 7. **Refresh challenge must return `403`** (not 401) — Chrome only re-signs on 403.
-8. **Challenges should be short & alphanumeric** — Chrome is picky.
+8. **The challenge is just a structured-field string** — its length/charset don't really matter.
+   Our demo uses a short counter for readability; `report-uri/dbsc-php` uses a 32-byte (64-hex-char)
+   random nonce and it works fine. (An earlier version claimed challenges "must be short &
+   alphanumeric because Chrome is picky" — that was a misdiagnosis; `dbsc-php`'s long hex challenge
+   disproves it. Production should use a **crypto-random, single-use** value — §9.3.)
 9. **Reject unknown sessions with `404`** or persisted sessions cause an infinite
    refresh storm after a server restart.
-10. **`Domain=` is *not* required for the bound cookie.** We use a **host-only** cookie with
-    `Secure` + `HttpOnly` (matching the production `dbsc-php` lib). The two references
-    disagree here — `drubery` uses `Domain=`, `dbsc-php` uses host-only + `Secure` +
-    `HttpOnly` — and both handshake fine. (An earlier version of this list wrongly claimed
+10. **`Domain=` is *not* required for the bound cookie.** The two references disagree — `drubery`
+    uses `Domain=`, `dbsc-php` uses host-only + `Secure` + `HttpOnly` — and both handshake fine.
+    We now use the **`__Host-` prefix** (`__Host-auth_cookie`), which *enforces* host-only +
+    `Secure` + `Path=/` (matching `dbsc-php`'s default). (An earlier version wrongly claimed
     `Domain=` was required; it isn't.)
 11. **Bound cookie uses `SameSite=Lax`, not `Strict`.** `Secure` + `HttpOnly` are always right
     for a session cookie. For `SameSite`, `Lax` is the better default: `Strict` would drop the

@@ -110,8 +110,9 @@ static COUNTER: AtomicU64 = AtomicU64::new(1);
 /// `.await` inside any handler after it's taken, so the guard never crosses an await point.
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
-/// Unique, short, alphanumeric id/challenge for the demo (NOT cryptographically strong).
-/// Chrome is picky about the challenge, so we avoid underscores / huge values.
+/// Unique short id/challenge for the demo, e.g. "sess3" (NOT cryptographically strong — a real
+/// server uses crypto-random values; challenge length/charset don't matter, `dbsc-php` uses a
+/// 32-byte hex nonce). The short counter is purely for readable logs.
 fn nonce(prefix: &str) -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}{n}")
