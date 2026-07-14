@@ -886,12 +886,19 @@ guarantees hold at handshake time — plus one WS-specific caveat. Work down thi
 > close live sockets on revoke, and/or periodically re-auth in-band. DBSC hardens *getting* the
 > connection; keeping a long-lived one secure is still on you.
 
-**See it yourself with `/ws-stream`** (the keep-alive endpoint): it checks the cookie once at the
-upgrade, then streams a `{"tick":N,…}` frame every 3 s.
+**Confirmed with `/ws-stream`** (the keep-alive endpoint): it checks the cookie once at the upgrade,
+then streams a `{"tick":N,…}` frame every 3 s. In testing, a stream opened with a **20-second**
+cookie ran **30 uninterrupted ticks over ~87 s** — the bound cookie expired/rotated several times
+underneath and the socket never noticed, re-checked, or dropped. Reproduce:
 
-1. `DBSC_COOKIE_MAX_AGE=20 cargo run`, register, click **Open WS stream (keep-alive)**.
-2. Now trigger loss of the session: hit **Logout (revoke)** (or just wait past expiry with the tab
-   backgrounded so Chrome stops refreshing).
+1. `DBSC_COOKIE_MAX_AGE=20 cargo run`, register, click **Open WS stream (keep-alive)** → ticks begin
+   (shown in the page's log pane; the server logs only `WS-STREAM OPEN`/`CLOSED`, not each tick).
+2. Kill the session **without leaving the page** — the ticks keep coming through it:
+   - **Expiry:** background the tab so Chrome stops proactively refreshing, and wait past 20 s; or
+   - **Revoke:** open `https://localhost:3000/logout` in a **second tab** (the server deletes the
+     binding + `Clear-Site-Data`). ⚠️ Don't click the on-page **Logout** button for this — it's a
+     link that **navigates away**, which unloads the page and closes the socket on its own,
+     regardless of DBSC.
 3. **The ticks keep coming.** The server never terminates the socket on expiry/revoke — proving the
    open connection is *not* re-validated against DBSC. Only a **new** handshake would be gated.
 
