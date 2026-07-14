@@ -458,7 +458,7 @@ While the parser read only the first header, we chased a long list of red herrin
 known to be irrelevant, because the fix made every one of them deliver `true`: `fetch()` vs.
 navigation · `SameSite` Lax/Strict · `Domain=` vs. host-only · the `__Host-` prefix · cookie
 **name** · **lifetime** (`Max-Age` 20/120/300) · `scope_specification` present/absent · **`localhost`
-vs. a real domain** · the **Secure Web Apps `.fbinfra.net` tunnel**. None of them mattered.
+vs. a real domain** · running behind a **reverse proxy / tunnel**. None of them mattered.
 
 Two sub-mysteries the same bug explains:
 - **`report-uri/dbsc-php`'s `/account` "worked" while our demo didn't** — PHP's `$_COOKIE` already
@@ -471,7 +471,7 @@ Two sub-mysteries the same bug explains:
 On the wire (especially HTTP/2, which Chrome uses over TLS) a single request can carry **multiple
 `Cookie` headers**, and DBSC puts its managed cookie in its own. **Always read them all**
 (`get_all`), never just the first. That was the entire bug — DBSC worked on macOS the whole time,
-over both `localhost` and the internal tunnel, for both `fetch()` and navigations.
+over both `localhost` and a real HTTPS domain, for both `fetch()` and navigations.
 
 ---
 
@@ -770,7 +770,7 @@ domain, etc. The requirement is a **real domain with a valid cert** (not `localh
 Chrome treats it as a proper secure context.
 
 ### It works on macOS
-Cookie delivery was **confirmed on macOS Chrome** over a real internal HTTPS domain —
+Cookie delivery was **confirmed on macOS Chrome** over a real HTTPS domain —
 `/api/protected` returns `authenticated=true` (see §5). No Windows needed. (Earlier notes here
 claimed macOS "still showed `authenticated=false`"; that was the multi-`Cookie`-header parsing bug,
 since fixed.)

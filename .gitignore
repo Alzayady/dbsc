@@ -2,6 +2,6 @@
 *.pem
 .claude/
 
-# Local-only deploy helpers (contain internal specifics — never publish)
+# Local-only deploy helpers (not part of the demo)
 deploy.sh
 run-devserver.sh
