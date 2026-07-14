@@ -15,7 +15,7 @@ Windows) and never leaves it.
 
 - On login, the **browser** generates a device key pair and proves possession of the
   private key by signing a challenge. The server stores the **public** key.
-- The server issues a **short-lived** cookie (e.g. 20s here).
+- The server issues a **short-lived** cookie (e.g. 5 min here).
 - Just before that cookie expires, the browser **automatically** re-proves possession
   (signs a fresh challenge) to get a new cookie — no page JavaScript involved.
 
@@ -79,7 +79,7 @@ sequenceDiagram
     Note over B: Reads the header, generates a device key pair<br/>private key stays in hardware
     B->>S: POST /dbsc/register (automatic) signed JWT<br/>jwk = public key, jti = challenge
     Note over S: Verify ES256 sig using the jwk<br/>(prod also checks jti == challenge)<br/>store session_identifier to public key
-    S-->>B: 200 session config + Set-Cookie auth_cookie (20s)
+    S-->>B: 200 session config + Set-Cookie __Host-auth_cookie (5 min)
     end
 
     rect rgb(240, 255, 244)
@@ -110,7 +110,7 @@ Server  → 200  + Secure-Session-Registration (algs, path, challenge)
 Browser makes a device key pair (private key stays in hardware)
 Browser → POST /dbsc/register   (signed JWT: jwk = public key, jti = challenge)
 Server verifies sig via jwk, stores session_identifier → public key,
-        → 200 session config + Set-Cookie auth_cookie (20s)
+        → 200 session config + Set-Cookie __Host-auth_cookie (5 min)
 
 ── Refresh (repeats every ~cookie lifetime, automatic) ──────────────
 Browser → POST /dbsc/refresh    (Sec-Secure-Session-Id, no proof)
@@ -205,7 +205,7 @@ instruction sheet that lets Chrome run the whole session on its own (no page Jav
     "include_site": false,
     "scope_specification": [ { "type": "include", "domain": "localhost", "path": "/" } ]
   },
-  "credentials": [ { "type": "cookie", "name": "auth_cookie",
+  "credentials": [ { "type": "cookie", "name": "__Host-auth_cookie",
                      "attributes": "Path=/; Secure; HttpOnly; SameSite=Lax" } ]
 }
 ```
@@ -219,10 +219,10 @@ instruction sheet that lets Chrome run the whole session on its own (no page Jav
 | ↳ `include_site` | `false` = **this origin only** (no subdomain span); `true` = the whole registrable site (`*.example.com`). |
 | ↳ `scope_specification` | `include`/`exclude` rules by domain+path. Here one `include` of `/` → manage the cookie for **all paths**. Add `exclude` rules (e.g. `/static`) to leave paths unmanaged. |
 | **`credentials`** | **Which cookie(s) Chrome treats as device-bound and keeps fresh.** |
-| ↳ `name` | Must **match the `Set-Cookie` name** (`auth_cookie`) or Chrome won't link them. |
+| ↳ `name` | Must **match the `Set-Cookie` name** (`__Host-auth_cookie`) or Chrome won't link them. |
 | ↳ `attributes` | The attribute template for the managed cookie (mirrors the `Set-Cookie`, minus `Max-Age`). |
 
-So after Flow 2 Chrome knows: *"for requests in **scope**, keep the cookie named `auth_cookie`
+So after Flow 2 Chrome knows: *"for requests in **scope**, keep the cookie named `__Host-auth_cookie`
 fresh; when it's about to expire, POST to **`refresh_url`** with **`session_identifier`**, get a
 new cookie, carry on."* That's what makes the register/refresh loop self-sustaining — the config
 is returned on **both** register and refresh so Chrome always holds the current instructions.
@@ -237,7 +237,7 @@ source of "wait, which one is this?" Here they all are, grouped by lifetime:
 | **device key** (public stored server-side; private in hardware) | — | Registration (Flow 2) | No | **the whole login session** | ✅ |
 | **`session_identifier`** (the "session id") | `sess3` | Registration (Flow 2) | No — stable | **the whole login session** | ✅ |
 | *(production)* **login/session cookie** ("auth token") | — | Login | No (maybe rotated) | **the whole login session** | ✅ |
-| **bound cookie value** (`auth_cookie`) | `cookie4` → `cookie6` → … | Every register **and** refresh | **Yes — every refresh** | ~one refresh cycle (`Max-Age=20s`) | ❌ |
+| **bound cookie value** (`__Host-auth_cookie`) | `cookie4` → `cookie6` → … | Every register **and** refresh | **Yes — every refresh** | ~one refresh cycle (`Max-Age=300s`) | ❌ |
 | **refresh challenge** | `refchal5` → `refchal7` | Every refresh (`403`) | **Yes — every refresh**, single-use | until used / next refresh (< challenge TTL) | ❌ |
 | **registration challenge** | `chal1` | Flow 1 invite | One-time | just the registration handshake | ❌ |
 | **login/correlation cookie** (`login_auth_id`) | `login2` | Flow 1 | One-time | registration window (minutes); **in prod = your login session cookie** | ❌ |
@@ -334,7 +334,7 @@ So the cookie counts differ:
 |---|-----------|------------|
 | Login/session cookie | `login_auth_id` (stand-in — no real login) | **long-lived** — auth + identifies the user at `/register` |
 | Separate correlation cookie | *(none — `login_auth_id` plays that role)* | **not needed** |
-| Bound cookie | `auth_cookie` (short) | `auth_cookie`-equivalent (short) |
+| Bound cookie | `__Host-auth_cookie` (short) | `__Host-`-prefixed bound cookie (short) |
 
 **Its `Max-Age` also isn't tied to any auth token:** it only needs to outlive the registration
 handshake (≈ the challenge TTL, minutes) — not the short bound cookie, and not the long login
@@ -535,7 +535,7 @@ which Chrome silently ignores. The docs never said that.)
 |---|-------------|--------------|-----|
 | 1 | Emits `Secure-Session-Registration` on the **login response** (`200` + a long-lived cookie). | Emits it on the *Start session* form-POST response, also a **`200`** (matching the docs). | A hello-world has no real login; the button standing in for it POSTs to `/start-form`, whose `200` response carries the header — the same shape as a real login. (A `303` redirect works too; drubery uses one.) |
 | 2 | Registration header example: `(ES256 RS256); path="/StartSession"` — **no `challenge`**. | We add `challenge="…"` and `authorization="…"`. | The `challenge` is echoed back in the JWT's `jti`, which is how a real server does anti-replay; both are permitted by the [spec](https://w3c.github.io/webappsec-dbsc/). Harmless to include. |
-| 3 | Bound cookie: `Max-Age=600` (10 min), `SameSite=Lax`, `Secure`. | `Max-Age=20`, `SameSite=Lax`, `Secure`, `HttpOnly`, host-only (no `Domain`). | 20s makes the auto-refresh observable within seconds. `SameSite=Lax` matches the docs; `Secure`+`HttpOnly`+host-only matches the production lib [`report-uri/dbsc-php`](https://github.com/report-uri/dbsc-php). |
+| 3 | Bound cookie: `Max-Age=600` (10 min), `SameSite=Lax`, `Secure`. | `__Host-auth_cookie`, `Max-Age=300` (5 min), `SameSite=Lax`, `Secure`, `HttpOnly`, host-only. | Short lifetime keeps auto-refresh observable. `SameSite=Lax` matches the docs; the **`__Host-` prefix** (Secure + Path=/ + no Domain) matches the production lib [`report-uri/dbsc-php`](https://github.com/report-uri/dbsc-php). |
 | 4 | **No enablement steps** (it documents shipped/production behavior). | Requires Chrome flags: **`Enabled – For developers`**, **UnexportableKeyService**, software-keys. | On macOS, DBSC is still "manual testing"; those flags (from the [testing wiki](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC)) skip the Origin-Trial-token check and let the OS generate the device key. Without them Chrome silently does nothing on `localhost`. |
 | 5 | Describes an optional **long-lived fallback cookie** for when refresh fails. | Not implemented. | Out of scope for a minimal demo. |
 | 6 | Barely specifies the **JWT** ("a public key in a JWT"). | We parse it fully: read the EC `jwk` from the JWT header at registration, verify ES256; on refresh verify against the **stored** key. | The docs punt JWT details to the spec; we implemented them so the proof is actually checked. |
@@ -568,7 +568,7 @@ immediately** (you can't wait for the async registration), and so a **non-DBSC b
 using the long-lived cookie (graceful degradation / fallback).
 
 **This project keeps them as two separate cookies instead** (like `report-uri/dbsc-php`):
-`login_auth_id` (the login stand-in, §3) and a *distinct* short-lived bound cookie (`auth_cookie`)
+`login_auth_id` (the login stand-in, §3) and a *distinct* short-lived bound cookie (`__Host-auth_cookie`)
 that is only ever set at register/refresh. Same end result — the bound (short-lived) cookie is
 established **after** registration — just without overloading one name.
 
@@ -592,7 +592,7 @@ way." Where we differ, it's because **we simplified** or because we run on **loc
 | Correlation cookie | Sets `dbsc-registration-sessions-id` in the form handler **and reads it** in `/register` to look up the pending session. | Sets `login_auth_id` (our stand-in name) but **doesn't read it** — `/register` just mints a fresh `session_identifier`. | Kept the demo minimal; correlation isn't needed when we create the session on the fly. |
 | JWT claim checks | Verifies signature **and** that `jti` == the issued challenge and `authorization` == the auth code. | We verify the **signature only** (log the claims). | Simpler to read; the signature is the core proof-of-possession. |
 | Enablement | Ships an **Origin-Trial token** (`origin-trial` header) valid for its real `deno.dev` domain. | Uses **Chrome testing flags** on `localhost`. | `localhost` can't carry a domain-bound OT token, so we take the flags door instead. |
-| Scope / cookie config | A form lets you set scope include/exclude paths, cookie name/value/lifetime at runtime. | **Hardcoded** (whole-origin scope, `auth_cookie`, 20s). | A hello-world doesn't need the knobs. |
+| Scope / cookie config | A form lets you set scope include/exclude paths, cookie name/value/lifetime at runtime. | **Hardcoded** (whole-origin scope, `__Host-auth_cookie`, 5 min). | A hello-world doesn't need the knobs. |
 | Protected endpoint | **None** — it only shows a session table. | We added **`/api/protected`** to test cookie delivery. | To make "is the bound cookie delivered?" observable (which surfaced our multi-`Cookie`-header parsing bug — §5). |
 | Language / stack | TypeScript on Deno; `fast-jwt` + `jwkToPem`. | Rust on axum; `p256` for ES256. | Personal preference / learning in Rust. |
 
@@ -623,7 +623,7 @@ the challenge · offering only `(ES256)` in the registration header (not the Chr
 | JWT checks | **Rejects** (throws) on bad signature, wrong / expired challenge (`jti` vs stored, constant-time), or `alg≠ES256`. | Pins `alg=ES256` and *computes* signature validity, but **logs & continues** — never rejects; `jti` not checked. | Deliberate demo shortcut so even a failed check still shows the flow. A real server must reject — the code comment says exactly this. |
 | Challenge | 32 crypto-random bytes, single-use; `challengeTtl` **must exceed `cookieMaxAge`** (enforced in `Config`) so a challenge cached just before expiry still validates. | Monotonic counter (`chal1`, `chal2`, …), not verified. | Not security-relevant in a demo; short & alphanumeric keeps Chrome happy. |
 | Registration header | `(ES256); path="/dbsc/register"; challenge="…"` — **no** `authorization`. | Same, but we add `authorization="auth-code-123"`. | Both are spec-legal; we include it to show where an auth code would ride. |
-| Bound cookie | `__Host-dbsc` (default), `Max-Age=300`, `SameSite=Lax`. | `auth_cookie`, `Max-Age=20`, `SameSite=Lax`. | 20s makes the auto-refresh observable in seconds. We tried the `__Host-` prefix (see §5) — it made no difference to delivery here, so we kept a plain host-only name. |
+| Bound cookie | `__Host-dbsc` (default), `Max-Age=300`, `SameSite=Lax`. | `__Host-auth_cookie`, `Max-Age=300`, `SameSite=Lax`. | Same shape — both use the `__Host-` prefix and a 5-minute lifetime. |
 | `scope` JSON | `origin` + `include_site:false`, **no `scope_specification`** (a `__Host-` cookie can't span subdomains anyway). | `origin` + `include_site:false` + an explicit `scope_specification` **include** rule. | Both work; we keep the explicit rule to make the scope visible. |
 | Enforcement | Full gate **primitives**: `getBinding`, constant-time `boundCookieMatches` (with a single-depth previous-value overlap for refresh races), document-vs-subresource, a registration grace window. The caller wires the policy. | None — just `/api/protected` reporting whether the cookie rode along. | We only *probe* delivery (which surfaced our cookie-parsing bug — §5); we don't gate. |
 | Refresh robustness | Single-depth **challenge + cookie overlap** windows for latency races; an optional single-phase **first** refresh via `advertiseRefreshChallenge`. | Straight `403`→proof→`200`, fresh cookie each time, no overlap. | Those windows matter under real network latency, not on loopback. |

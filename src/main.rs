@@ -41,7 +41,7 @@ struct Config {
     bind: String,        // DBSC_BIND        — socket to listen on, e.g. [::]:8443
     tls_cert: String,    // DBSC_TLS_CERT    — PEM cert path
     tls_key: String,     // DBSC_TLS_KEY     — PEM key path
-    cookie_name: String, // DBSC_COOKIE_NAME — the device-bound cookie's name (default auth_cookie)
+    cookie_name: String, // DBSC_COOKIE_NAME — device-bound cookie name (default __Host-auth_cookie)
 }
 static CONFIG: OnceLock<Config> = OnceLock::new();
 fn cfg() -> &'static Config {
@@ -169,7 +169,7 @@ async fn main() {
         bind: env("DBSC_BIND", "127.0.0.1:3000"),
         tls_cert: env("DBSC_TLS_CERT", "localhost+2.pem"),
         tls_key: env("DBSC_TLS_KEY", "localhost+2-key.pem"),
-        cookie_name: env("DBSC_COOKIE_NAME", "auth_cookie"),
+        cookie_name: env("DBSC_COOKIE_NAME", "__Host-auth_cookie"),
     });
 
     let state = AppState::default();
