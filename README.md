@@ -833,9 +833,16 @@ replies over the socket with `{ "authenticated": …, "transport": "websocket" }
 | **Delivery:** does the bound cookie ride a `wss://` handshake? | **Yes** — a same-origin WS upgrade is a normal credentialed GET, so `__Host-auth_cookie` attaches → `authenticated=true` (after you register a session). | FLOW 5 (WS) in the terminal; DevTools → Network → the `/ws` request → **Cookie** header. |
 | **Deferral/refresh:** if the cookie is *stale* at handshake time, does Chrome **defer the upgrade and refresh first** (as it does for `fetch()`/navigations)? | **Version-dependent — now being wired up.** Early DBSC deferred only regular HTTP requests, not WS upgrades. Chromium has since added handshake deferral for WebSockets ([CL 7173849](https://chromium-review.googlesource.com/c/chromium/src/+/7173849)), so a **recent** Chrome should refresh first; an older one won't. This probe tells you which behaviour *your* build has. | Let the bound cookie expire (`Max-Age=300`), then click the WS button. **If** a `POST /dbsc/refresh` FLOW fires *right before* the handshake completes → deferral covers WS in your Chrome. If the handshake goes out with a stale/absent cookie and **no** refresh precedes it → your build doesn't defer WS yet. |
 
-> **Testing tip:** to force the stale case, lower `COOKIE_MAX_AGE_SECS` (e.g. to `20`), register a
-> session, wait for the cookie to expire *without* triggering a normal request, then click the WS
-> button and watch whether a refresh fires ahead of the `/ws` handshake.
+> **Confirmed (macOS Chrome):** the bound cookie **does ride the `wss://` handshake** — `/ws` logs
+> `authenticated=true` with `__Host-auth_cookie=…` present in the upgrade request's `Cookie` header,
+> exactly like `/api/protected`. That settles the **delivery** question ✅ (tested with a *fresh*
+> cookie). The **deferral** question — stale cookie → refresh *before* the handshake — still needs
+> the stale-cookie test below.
+
+> **Testing tip (the deferral case):** to force a stale cookie, lower `COOKIE_MAX_AGE_SECS` (e.g. to
+> `20`), register a session, wait for the cookie to expire *without* triggering any other request,
+> then click the WS button and watch whether a `POST /dbsc/refresh` FLOW fires ahead of the `/ws`
+> handshake.
 
 ### Why axum's WebSocket support, not raw `tungstenite`
 This server uses `axum::extract::ws` (enabled via `axum`'s **`ws`** feature), which is built on
