@@ -11,6 +11,7 @@
 //!   POST /dbsc/refresh   – Chrome re-proves possession here (challenge → signed retry → re-mint) [FLOW 3/4]
 //!   GET  /api/protected  – reports whether the device-bound cookie rode along  [FLOW 5]
 //!   GET  /ws             – same check over a WebSocket handshake (does DBSC cover WS?)  [FLOW 5]
+//!   GET  /ws-stream      – keep-alive WS: proves DBSC guards the handshake, not the open socket [FLOW 5]
 //!   GET  /logout         – revoke: delete the binding, clear the cookie, end the DBSC session  [FLOW 6]
 //!
 //! DBSC headers use the `Secure-Session-*` names (plus `Sec-Secure-Session-Id`). Chrome's
@@ -211,6 +212,7 @@ async fn main() {
         .route("/dbsc/refresh", post(refresh))
         .route("/api/protected", get(protected))
         .route("/ws", get(ws_protected))
+        .route("/ws-stream", get(ws_stream))
         .route("/logout", get(logout))
         .with_state(state);
 
@@ -557,6 +559,55 @@ async fn ws_reply(mut socket: WebSocket, authed: bool) {
     let _ = socket.close().await;
 }
 
+/// A **keep-alive** WebSocket, to demonstrate the DBSC caveat: *DBSC secures the handshake, not the
+/// open connection.* We check the bound cookie **once** (at the upgrade), then hold the socket open
+/// and push a tick every 3s until the client closes. Nothing re-checks the cookie mid-stream — so a
+/// socket opened while the session was valid keeps streaming even after the cookie expires or you
+/// hit Logout (revoke). Open it, then watch it survive an expiry/revoke.
+async fn ws_stream(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let _log = LOG_LOCK.lock().unwrap();
+    let cookie = cookie_in(&headers);
+    let authed = has_bound_cookie(&headers);
+    flow_header(5, "WS-STREAM OPEN  (GET /ws-stream — keep-alive; NOT re-checked after upgrade)");
+    println!("  REQUEST : GET /ws-stream  (Upgrade: websocket)  |  Cookie: {cookie}");
+    println!("  RESPONSE: 101 Switching Protocols  ->  authenticated_at_handshake={authed}; streaming a tick every 3s");
+    println!("            NOTE: this socket stays open even if the cookie later expires or you revoke —");
+    println!("                  DBSC guards the handshake, not the live connection (frames carry no cookie).");
+    ws.on_upgrade(move |socket| ws_stream_task(socket, authed))
+}
+
+/// The long-lived socket task: emit a JSON tick every 3s; stop when the client closes/errors.
+async fn ws_stream_task(mut socket: WebSocket, authed_at_handshake: bool) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3));
+    let mut n: u64 = 0;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                n += 1;
+                let msg = json!({
+                    "tick": n,
+                    "authenticated_at_handshake": authed_at_handshake,
+                    "note": "socket NOT re-checked vs DBSC; stays open past cookie expiry/revoke"
+                }).to_string();
+                if socket.send(Message::Text(msg)).await.is_err() {
+                    break; // client went away
+                }
+            }
+            incoming = socket.recv() => {
+                // Client closed (Close frame or stream end) or errored -> stop.
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {} // ignore any other client-sent frames
+                }
+            }
+        }
+    }
+    let _log = LOG_LOCK.lock().unwrap();
+    flow_header(5, "WS-STREAM CLOSED  (GET /ws-stream)");
+    println!("  socket ended after {n} tick(s)  (client closed; server never terminated it on cookie expiry/revoke)");
+}
+
 /// Revoke (logout): end the device-bound session. Deletes the server-side `Binding` (so any
 /// future `/dbsc/refresh` gets 404 and Chrome drops the session), deletes the bound cookie, and
 /// sends `Clear-Site-Data` to tell Chrome to clear cookies + end the DBSC session for the origin.
@@ -694,6 +745,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <code>authenticated=true</code> once a session is registered.</li>
     <li><b>Call protected (WebSocket)</b> does the same check on a <code>wss://</code>
         <em>handshake</em> — testing whether the bound cookie (and DBSC) covers WebSockets.</li>
+    <li><b>Open WS stream (keep-alive)</b> holds a socket open and streams a tick every 3s. Open it,
+        then let the cookie expire or hit <b>Logout</b> — the ticks keep coming, showing DBSC guards
+        only the handshake, not an already-open connection.</li>
   </ol>
   <p>
     <!-- This is a real form-POST navigation (the page then shows /start-form's 200) ON PURPOSE.
@@ -705,6 +759,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </form>
     <button onclick="callProtected()">Call protected</button>
     <button onclick="callProtectedWs()">Call protected (WebSocket)</button>
+    <button onclick="openWsStream()">Open WS stream (keep-alive)</button>
+    <button onclick="closeWsStream()">Close WS stream</button>
     <a href="/logout"><button type="button">Logout (revoke)</button></a>
   </p>
   <pre id="log">(server log is in your terminal; browser log here)</pre>
@@ -725,6 +781,21 @@ function callProtectedWs() {
   const ws = new WebSocket('wss://' + location.host + '/ws');
   ws.onmessage = (e) => { log('WS /ws -> ' + e.data); ws.close(); };
   ws.onerror = () => log('WS /ws -> error (is the session registered?)');
+}
+
+// Keep-alive socket: open it, then let the cookie expire or hit Logout and watch the ticks KEEP
+// coming — proof that DBSC only guards the handshake, not an already-open connection.
+let wsStream = null;
+function openWsStream() {
+  if (wsStream) { log('WS-stream already open'); return; }
+  wsStream = new WebSocket('wss://' + location.host + '/ws-stream');
+  wsStream.onopen = () => log('WS-stream opened (keep-alive)');
+  wsStream.onmessage = (e) => log('WS-stream <- ' + e.data);
+  wsStream.onclose = () => { log('WS-stream closed'); wsStream = null; };
+  wsStream.onerror = () => log('WS-stream error');
+}
+function closeWsStream() {
+  if (wsStream) wsStream.close(); else log('no WS-stream open');
 }
 </script>
 </body>

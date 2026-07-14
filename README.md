@@ -44,7 +44,7 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 
 ---
 
-## 2. Endpoints (7)
+## 2. Endpoints (8)
 
 | Method & path         | Who calls it            | What it does |
 |-----------------------|-------------------------|--------------|
@@ -53,7 +53,8 @@ registration, (2) verifies the signed proof and sets a cookie, (3) re-verifies o
 | `POST /dbsc/register` | **Browser (automatic)** | Receives the signed proof JWT (`Secure-Session-Response`). The JWT **header** embeds the device **public key** as a `jwk`; the **claims** echo our challenge back as the `jti`. We verify the ES256 signature, store the key under a new `session_identifier`, and return the **session config** JSON + a short-lived bound cookie. |
 | `POST /dbsc/refresh`  | **Browser (automatic)** | Called when the bound cookie needs refreshing. First hit has no proof → we reply **403 + `Secure-Session-Challenge`**. The browser re-signs (same device key; new challenge as `jti`, **no `jwk`**) and retries → we verify against the **stored** key and re-mint the cookie. Unknown session → **404** (drops stale sessions). |
 | `GET  /api/protected` | Web client (Call protected button) | Reports whether the device-bound cookie was delivered (`authenticated: true/false`). |
-| `GET  /ws`            | Web client (Call protected (WebSocket) button) | Same delivery check over a **WebSocket handshake** — to test whether DBSC/the bound cookie covers WebSockets. Reads the cookie from the HTTP **upgrade** request, then replies with one JSON frame (§11). |
+| `GET  /ws`            | Web client (Call protected (WebSocket) button) | Same delivery check over a **WebSocket handshake** — to test whether DBSC/the bound cookie covers WebSockets. Reads the cookie from the HTTP **upgrade** request, replies with one JSON frame, then closes (§11). |
+| `GET  /ws-stream`     | Web client (Open WS stream button) | **Keep-alive** WebSocket: checks the cookie **once** at the upgrade, then holds the socket open and streams a tick every 3s. Demonstrates that DBSC guards the *handshake*, not the *open connection* — the socket survives cookie expiry / revoke (§11). |
 | `GET  /logout`        | Web client (Logout button) | **Revoke**: deletes the server-side `Binding`, expires the bound cookie, and sends `Clear-Site-Data` to end the DBSC session. A future refresh then gets `404`. |
 
 Header names are `Secure-Session-*`; Chrome's docs get these right — it's older blog posts
@@ -884,6 +885,19 @@ guarantees hold at handshake time — plus one WS-specific caveat. Work down thi
 > is inherent to WebSockets, not a DBSC bug. For sensitive WS traffic, add **app-level** handling:
 > close live sockets on revoke, and/or periodically re-auth in-band. DBSC hardens *getting* the
 > connection; keeping a long-lived one secure is still on you.
+
+**See it yourself with `/ws-stream`** (the keep-alive endpoint): it checks the cookie once at the
+upgrade, then streams a `{"tick":N,…}` frame every 3 s.
+
+1. `DBSC_COOKIE_MAX_AGE=20 cargo run`, register, click **Open WS stream (keep-alive)**.
+2. Now trigger loss of the session: hit **Logout (revoke)** (or just wait past expiry with the tab
+   backgrounded so Chrome stops refreshing).
+3. **The ticks keep coming.** The server never terminates the socket on expiry/revoke — proving the
+   open connection is *not* re-validated against DBSC. Only a **new** handshake would be gated.
+
+That's the actionable takeaway: gate WebSocket **connects** with DBSC (free — the cookie rides the
+upgrade), but for revocation/expiry to matter *during* a long-lived socket you must close it or
+re-auth in-band yourself.
 
 ### HTTP vs WebSocket — is anything different?
 
